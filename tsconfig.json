@@ -1,0 +1,23 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "types": [
+      "bun",
+      "node"
+    ],
+    "skipLibCheck": true
+  },
+  "include": [
+    "control/**/*.ts",
+    "core/**/*.ts",
+    "adapters/**/*.ts",
+    "ops/**/*.ts",
+    "state/**/*.ts"
+  ]
+}

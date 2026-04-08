@@ -1,0 +1,86 @@
+{
+  "job_id": "job-phase1-local",
+  "freeze_id": "freeze-phase1-local",
+  "freeze_version": "phase1-local-v1",
+  "story_id": "STORY-PHASE1-LOCAL-001",
+  "run_role": "__RUN_ROLE__",
+  "run_attempt": "__RUN_ATTEMPT__",
+  "run_id": "__RUN_ID__",
+  "repo_path": "__REPO_PATH__",
+  "base_commit": "__BASE_COMMIT__",
+  "state_path": "__STATE_PATH__",
+  "artifact_path": "__ARTIFACT_PATH__",
+  "runtime_home": "__RUNTIME_HOME__",
+  "task_packet_sha256": "__TASK_PACKET_SHA256__",
+  "language_policy": "English repository-facing outputs only.",
+  "budget_limits": {
+    "tokens": 5000,
+    "usd": 0
+  },
+  "time_limits": {
+    "minutes": 5
+  },
+  "policy_profile": {
+    "profile_id": "phase1-local-minimal",
+    "network_access": "deny",
+    "review_executor": "disabled"
+  },
+  "risk_context": {
+    "open_risks": [],
+    "escalated_risks": []
+  },
+  "approval_context": {
+    "approval_card_id": "card-phase1-local-001",
+    "approval_state": "DECIDED",
+    "approved_by": "local-owner",
+    "approved_at": "2026-04-08T00:00:00Z"
+  },
+  "previous_handoff_path": "__PREVIOUS_HANDOFF_PATH__",
+  "requested_capabilities": [
+    "filesystem_read",
+    "filesystem_write",
+    "shell_command"
+  ],
+  "story": {
+    "story_id": "STORY-PHASE1-LOCAL-001",
+    "story_objective": "Prove the Phase 1 local slice by executing builder and QA against one approved story on a single host.",
+    "acceptance_ids": [
+      "ACC-PHASE1-BUILDER",
+      "ACC-PHASE1-QA"
+    ],
+    "in_scope_checklist": [
+      "Single-node builder execution",
+      "Single-node QA execution",
+      "Run-scoped artifacts under artifacts/runs/<run_id>/",
+      "State store updates after each run"
+    ],
+    "out_of_scope_checklist": [
+      "Mobile channel input",
+      "Production deployment hardening",
+      "Wuying integration",
+      "Distributed scheduling",
+      "Dashboard UI"
+    ],
+    "acceptance_criteria": [
+      "The builder run writes the standard output bundle for the approved story.",
+      "The QA run validates the same story and closes the trace with documented evidence."
+    ],
+    "mandatory_checks": [
+      "scope-compliance",
+      "artifact-presence",
+      "evidence-completeness",
+      "acceptance-closure"
+    ],
+    "verification_targets": "__VERIFICATION_TARGETS__",
+    "expected_artifacts": "__EXPECTED_ARTIFACTS__",
+    "stop_conditions": [
+      "mandatory validation fails",
+      "approval is required",
+      "change request is required"
+    ],
+    "escalation_rules": [
+      "Escalate on scope drift.",
+      "Escalate on missing required artifacts."
+    ]
+  }
+}
