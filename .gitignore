@@ -1,0 +1,53 @@
+# Python local environment
+.venv/
+venv/
+.python-version
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+build/
+dist/
+site/
+.eggs/
+*.egg-info/
+pip-wheel-metadata/
+
+# Control-plane live state
+/state/store/
+/state/progress.en.md
+/state/story-queue.json
+/state/active-story.json
+/state/handoff.en.md
+/state/risk-register.en.md
+/state/loop-metrics.json
+/state/decisions.en.md
+/state/trace-index.json
+
+# Artifact and archive plane
+/artifacts/
+/jobs/
+
+# Worker runtime and local proof workspace
+/runtime-home/
+/workspace/
+/cache/
+
+# Local credentials
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Editor and OS noise
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

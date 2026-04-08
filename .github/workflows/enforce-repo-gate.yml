@@ -1,0 +1,34 @@
+name: enforce-repo-gate
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/verify.yml"
+      - ".github/workflows/enforce-repo-gate.yml"
+      - "scripts/github_repo_gate.py"
+  schedule:
+    - cron: "17 3 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  enforce:
+    runs-on: ubuntu-latest
+    env:
+      REPO_ADMIN_TOKEN: ${{ secrets.REPO_ADMIN_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: enforce
+        if: ${{ env.REPO_ADMIN_TOKEN != '' }}
+        run: python scripts/github_repo_gate.py apply --token-env REPO_ADMIN_TOKEN
+      - name: missing-token
+        if: ${{ env.REPO_ADMIN_TOKEN == '' }}
+        run: |
+          echo "REPO_ADMIN_TOKEN is not configured; repository gate was not applied."
