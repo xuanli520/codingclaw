@@ -14,6 +14,11 @@ No builder or QA execution may start unless:
 
 ## Contract Objects
 
+The canonical section order for these documents is defined in:
+
+- [DEVELOPMENT_PLAN_TEMPLATE.en.md](DEVELOPMENT_PLAN_TEMPLATE.en.md)
+- [CONTRACT_FREEZE_TEMPLATE.en.md](CONTRACT_FREEZE_TEMPLATE.en.md)
+
 ### Development Plan
 
 The Development Plan is the pre-implementation agreement. It must include:
@@ -31,6 +36,8 @@ The Development Plan is the pre-implementation agreement. It must include:
 - current repo baseline
 - intended execution surface
 - approval touchpoints
+
+`DEVELOPMENT_PLAN.en.md` must preserve the template headings from [DEVELOPMENT_PLAN_TEMPLATE.en.md](DEVELOPMENT_PLAN_TEMPLATE.en.md).
 
 ### Contract Freeze
 
@@ -53,6 +60,10 @@ The Contract Freeze is the execution contract. It must include:
 - freeze version
 - freeze timestamp
 - freeze hash
+
+`CONTRACT_FREEZE.en.md` must preserve the template headings from [CONTRACT_FREEZE_TEMPLATE.en.md](CONTRACT_FREEZE_TEMPLATE.en.md).
+
+Approved adapters and capability assumptions must reuse the adapter vocabulary from [EXECUTOR_ADAPTER_CONTRACT.md](EXECUTOR_ADAPTER_CONTRACT.md).
 
 ## Baseline Binding
 

@@ -12,12 +12,14 @@
 - `story_id`
 - `run_role`
 - `run_attempt`
+- `run_id`
 - `repo_path`
 - `base_commit`
 - `state_path`
 - `artifact_path`
 - `runtime_home`
 - `task_packet_sha256`
+- `language_policy`
 - `budget_limits`
 - `time_limits`
 - `policy_profile`
@@ -45,6 +47,7 @@ The story payload must include:
 ## Policy Rules
 
 - `run_role` may only be `builder`, `qa`, or `review`
+- `artifact_path` must point to the current run root under `artifacts/runs/<run_id>/`
 - the packet must point to an approved freeze version
 - the packet must not contain long-lived secrets
 - the packet must not omit out-of-scope boundaries
@@ -58,3 +61,5 @@ The story payload must include:
 ## Generation Responsibility
 
 Only the control shell generates the task packet. Executors may read it but must not rewrite its scope-defining fields.
+
+Adapter-facing transport around this packet must follow [EXECUTOR_ADAPTER_CONTRACT.md](EXECUTOR_ADAPTER_CONTRACT.md).

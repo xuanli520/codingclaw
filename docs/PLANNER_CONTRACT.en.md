@@ -19,7 +19,7 @@ The Planner reads:
 
 The Planner must produce:
 
-- `DEVELOPMENT_PLAN.en.md`
+- `DEVELOPMENT_PLAN.en.md` following [DEVELOPMENT_PLAN_TEMPLATE.en.md](DEVELOPMENT_PLAN_TEMPLATE.en.md)
 - a story breakdown
 - acceptance IDs or equivalent acceptance references
 - a Chinese approval summary for the owner
@@ -33,12 +33,16 @@ The plan must define:
 - goals
 - non-goals
 - assumptions
+- current repo baseline
+- intended execution surface
 - architecture direction
 - milestones
 - story breakdown
 - testing strategy
 - delivery checklist
 - risks
+- open questions
+- approval touchpoints
 - approval requested
 
 ## Constraints

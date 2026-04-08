@@ -11,22 +11,26 @@ The system must generate checksums for:
 - Development Plan
 - Contract Freeze
 - `contract-freeze.json`
+- approval card snapshots and decision records that authorize execution, scope change, or takeover
+- `takeover-packet.en.md` and takeover result records when takeover is used
 - final repository archive
 - QA report
-- final summary
+- `final-summary.en.md`
 - key session or run logs
 - important evidence bundles
 
 ## File Placement
 
 - per-job checksum output should be written to `checksums.txt`
-- freeze-specific checksum files may be written beside the freeze objects
+- the canonical freeze checksum file is `contract-freeze.sha256`
+- freeze-specific checksum files must be written beside the freeze objects
 - artifact index entries should reference checksum records when available
 
 ## Timing Rules
 
 Checksums should be generated:
 
+- immediately after an approval card is decided
 - immediately after Contract Freeze generation
 - immediately after a run finishes and artifacts stabilize
 - immediately before archive finalization
@@ -36,6 +40,7 @@ Checksums should be generated:
 The control shell or QA must verify checksums when:
 
 - resuming from a previous run
+- resuming from takeover
 - comparing a current repo to the frozen baseline package
 - validating final archive integrity
 

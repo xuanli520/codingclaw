@@ -4,6 +4,12 @@
 
 This document defines the operating model of CodingClaw, an IronClaw-based coding orchestration system designed for Chinese control, English engineering delivery, auditable short loops, and strict scope governance.
 
+## Authority Boundary
+
+`SYSTEM_BLUEPRINT.md` is the canonical top-level definition of the system.
+
+`ARCHITECTURE_OVERVIEW.md` expands the runtime decomposition and Phase 1 module shape, but it must not redefine the top-level operating model, governance boundary, or layer set defined here.
+
 ## System Definition
 
 CodingClaw is:
@@ -35,7 +41,7 @@ CodingClaw is not:
 
 ### Control Shell
 
-The control shell accepts Chinese commands, normalizes requirements, manages approval gates, budgets, policy guards, and dispatches loop work through adapters.
+The control shell accepts Chinese commands, normalizes requirements, manages approval gates, budgets, policy guards, and dispatches loop work through adapters governed by [EXECUTOR_ADAPTER_CONTRACT.md](EXECUTOR_ADAPTER_CONTRACT.md).
 
 ### Coding Loop Kernel
 
@@ -83,25 +89,34 @@ The system must maintain at least:
 - `state/decisions.en.md`
 - `state/trace-index.json`
 
+The required shapes and update rules for these files are defined in [STATE_STORE_SPEC.md](STATE_STORE_SPEC.md).
+
 ## Required Governance Objects
 
 Before execution:
 
-- `DEVELOPMENT_PLAN.en.md`
+- `DEVELOPMENT_PLAN.en.md` following [DEVELOPMENT_PLAN_TEMPLATE.en.md](DEVELOPMENT_PLAN_TEMPLATE.en.md)
 - Chinese summary for owner approval
-- `CONTRACT_FREEZE.en.md`
+- archived approval card snapshot and decision record under `approvals/<card_id>/`
+- `CONTRACT_FREEZE.en.md` following [CONTRACT_FREEZE_TEMPLATE.en.md](CONTRACT_FREEZE_TEMPLATE.en.md)
 - `contract-freeze.json`
 - `contract-freeze.sha256`
 
 Per loop:
 
+- a run-scoped artifact set under `artifacts/runs/<run_id>/`
 - `task-packet.en.json`
-- `implementation-summary.en.md` or `qa-report.en.md`
+- `implementation-summary.en.md`, `qa-report.en.md`, or `review-report.en.md`
 - `self-check.en.md` for builder runs
 - `fixback-items.en.md` for QA failure loops
+- `takeover-packet.en.md` when takeover is triggered
 - `handoff.en.md`
 - `run-result.json`
 - `artifact-index.json`
+
+At archive finalization:
+
+- `artifacts/final/final-summary.en.md`
 
 ## Phase 1 Scope
 
@@ -116,10 +131,13 @@ Phase 1 is the minimum working product. It includes:
 - traceability from story to acceptance to QA verdict
 - local artifact archival and checksums
 
+Phase 1 live execution ends at QA. Independent review remains a later-phase extension.
+
 Phase 1 excludes:
 
 - multi-channel concurrency
 - multi-adapter parallel execution
+- mandatory review executor in the live path
 - Wuying automation
 - dashboards
 - historical job reuse
@@ -127,9 +145,18 @@ Phase 1 excludes:
 
 ## Related Documents
 
-- `ARCHITECTURE_OVERVIEW.md`
-- `DEPLOYMENT_PLAN.md`
-- `CONTRACT_POLICY.md`
-- `LOOP_SPEC.md`
-- `ARTIFACT_LAYOUT_SPEC.md`
-- `WUYING_INTEGRATION_PLAN.md`
+- [README.md](README.md)
+- [ARCHITECTURE_OVERVIEW.md](ARCHITECTURE_OVERVIEW.md)
+- [DEPLOYMENT_PLAN.md](DEPLOYMENT_PLAN.md)
+- [CONTRACT_POLICY.md](CONTRACT_POLICY.md)
+- [DEVELOPMENT_PLAN_TEMPLATE.en.md](DEVELOPMENT_PLAN_TEMPLATE.en.md)
+- [CONTRACT_FREEZE_TEMPLATE.en.md](CONTRACT_FREEZE_TEMPLATE.en.md)
+- [LOOP_SPEC.md](LOOP_SPEC.md)
+- [EXECUTOR_ADAPTER_CONTRACT.md](EXECUTOR_ADAPTER_CONTRACT.md)
+- [STATE_STORE_SPEC.md](STATE_STORE_SPEC.md)
+- [STATUS_MODEL.md](STATUS_MODEL.md)
+- [APPROVAL_CARD_SPEC.md](APPROVAL_CARD_SPEC.md)
+- [REVIEW_CONTRACT.en.md](REVIEW_CONTRACT.en.md)
+- [ARTIFACT_LAYOUT_SPEC.md](ARTIFACT_LAYOUT_SPEC.md)
+- [WUYING_INTEGRATION_PLAN.md](WUYING_INTEGRATION_PLAN.md)
+- [TAKEOVER_PACKET_TEMPLATE.en.md](TAKEOVER_PACKET_TEMPLATE.en.md)

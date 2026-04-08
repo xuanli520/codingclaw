@@ -20,6 +20,7 @@ LOAD_CONTRACT
  -> LOAD_PROGRESS
  -> SELECT_NEXT_STORY
  -> BUILD_TASK_PACKET
+ -> ALLOCATE_RUN_ROOT
  -> RUN_EXECUTOR
  -> COLLECT_OUTPUTS
  -> RUN_SELF_CHECK(optional for builder)
@@ -62,6 +63,7 @@ The task packet must:
 
 - inherit scope from the active freeze
 - include only the selected story
+- assign a unique `run_id` and output root before dispatch
 - declare in-scope and out-of-scope work
 - list mandatory commands or checks when required
 - define expected artifacts and exit conditions
@@ -70,6 +72,7 @@ The task packet must:
 
 - the loop launches only one role at a time
 - the worker may be builder, QA, or review
+- Phase 1 requires builder and QA only. Review remains optional until a later phase enables it.
 - workers must return standard output objects and a standard exit status
 - unapproved privileged actions must interrupt execution and return approval-needed status
 
@@ -77,22 +80,34 @@ The task packet must:
 
 Every loop must produce:
 
-- `run-result.json`
-- `artifact-index.json`
-- `command-log.txt`
-- `handoff.en.md`
+- a run-scoped artifact set under `artifacts/runs/<run_id>/`
+- `metadata/task-packet.en.json`
+- `metadata/run-result.json`
+- `metadata/artifact-index.json`
+- `logs/command-log.txt`
+- `reports/handoff.en.md`
 
 Builder loops also produce:
 
-- `implementation-summary.en.md`
-- `self-check.en.md`
-- `test-results/`
+- `reports/implementation-summary.en.md`
+- `reports/self-check.en.md`
+- `evidence/test-results/`
 
 QA loops also produce:
 
-- `qa-report.en.md`
-- `fixback-items.en.md` when needed
-- `qa-verdict.json`
+- `reports/qa-report.en.md`
+- `reports/fixback-items.en.md` when needed
+- `metadata/qa-verdict.json`
+
+Review loops also produce:
+
+- `reports/review-report.en.md`
+
+Takeover-triggering loops also produce:
+
+- `takeover/takeover-packet.en.md`
+
+`reports/handoff.en.md` is the canonical handoff record for the current `run_id`.
 
 ## Exit Conditions
 
@@ -124,6 +139,8 @@ The executor may only return:
 - `TIMEOUT`
 - `BUDGET_EXCEEDED`
 
+These values are run exit statuses only. Job states and approval card states are defined in `STATUS_MODEL.md`.
+
 ## State Update Rules
 
 After each run, the loop must update:
@@ -132,7 +149,7 @@ After each run, the loop must update:
 - active story status
 - trace index
 - risk register if new risk exists
-- handoff
+- the archived run handoff first, then `state/handoff.en.md` as the latest mirror
 - metrics
 
 ## Fixback Policy

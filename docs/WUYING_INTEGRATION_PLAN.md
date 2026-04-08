@@ -25,7 +25,7 @@ Wuying is not the primary builder environment. It exists for:
 The integration should define:
 
 - Wuying session provisioning or lookup
-- takeover packet generation
+- takeover packet generation following `TAKEOVER_PACKET_TEMPLATE.en.md`
 - secure access handoff
 - result collection
 - resume signal back into the control shell
@@ -33,8 +33,8 @@ The integration should define:
 ## Control Rules
 
 - Wuying access must be explicitly approved
-- main loop execution pauses during takeover unless the task is explicitly parallel-safe
-- all takeover results must be written back as artifacts and handoff records
+- main loop execution must transition into `AWAITING_TAKEOVER` during takeover unless the task is explicitly parallel-safe
+- all takeover results must be written back under `artifacts/runs/<run_id>/takeover/` and referenced by handoff and manifest records
 
 ## Phase Plan
 
@@ -45,7 +45,7 @@ The integration should define:
 
 ### Phase 2
 
-- managed takeover packet format
+- managed takeover packet format and archive path
 - stable resume semantics
 
 ### Phase 3

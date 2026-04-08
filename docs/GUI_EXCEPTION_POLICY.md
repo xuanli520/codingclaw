@@ -29,7 +29,7 @@ GUI handling must not be used to:
 ## Governance Rules
 
 - GUI entry requires explicit approval
-- the main loop must pause before takeover starts
+- the main loop must leave its active `RUNNING_*` state and enter `AWAITING_TAKEOVER` before takeover starts
 - the human or assisted operator must record what changed
 - resulting artifacts must be archived
 - the resumed loop must reference the takeover output

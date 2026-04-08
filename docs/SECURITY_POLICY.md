@@ -66,11 +66,12 @@ The policy guard must support:
 
 On suspected credential exposure or policy failure:
 
-1. stop the active run
+1. stop the active run and record `FAILED_POLICY`
 2. revoke or rotate exposed credentials
-3. mark the job as security-blocked
-4. preserve redacted evidence
-5. require owner review before resuming
+3. move the job to `AWAITING_OWNER`
+4. preserve redacted evidence and approval context
+5. escalate the job to `TERMINATED_WITH_RISK_REPORT` if exposure is confirmed or the evidence can no longer be trusted
+6. require owner review before resuming, re-freezing, or terminating
 
 ## Phase 1 Minimum Bar
 

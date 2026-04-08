@@ -3,6 +3,7 @@
 ## 1. 文档目的
 
 本文档用于定义 **CodingClaw** 的系统蓝图、治理边界、开发顺序、运行约束、交付规范与审计规则。  
+本文件属于控制面蓝图参考，不属于 `docs/` 英文工程交付文档集合，也不进入最终英文工程交付包。  
 CodingClaw 是基于 **IronClaw** 思路进行二次设计与定制化扩展的自动编码代理系统，其目标不是构建一个无边界、无限制、无审批的“全自动写代码黑盒”，而是建立一套：
 
 - 以中文为控制语言
@@ -458,7 +459,7 @@ Contract Freeze 不是纯文本承诺，而是必须绑定到可验证的工程�
 - `CONTRACT_FREEZE.en.md` 必须记录 `base_commit`
 - `contract-freeze.json` 必须记录依赖锁文件摘要、适配器版本与任务包摘要
 - QA 必须验证本轮执行是否从该 `base_commit` 或其批准后的续接 commit 开始
-- 若 repo 状态、依赖快照或适配器版本与冻结记录不一致，本轮不得继续执行，必须转入 `CHANGE_REQUEST_REQUIRED` 或重新冻结
+- 若 repo 状态、依赖快照或适配器版本与冻结记录不一致，本轮不得继续执行，必须转入 `CHANGE_REQUEST_PENDING` 或重新冻结
 
 ### 8.4 冻结后的约束
 
@@ -547,6 +548,8 @@ state/
   decisions.en.md
   trace-index.json
 ```
+
+这些状态文件的英文工程规范建议统一收敛到 `docs/STATE_STORE_SPEC.md`。
 
 ### 9.5 Loop 退出条件
 
@@ -695,8 +698,8 @@ Builder -> QA -> Builder -> QA
 
 超过阈值后应自动进入：
 
-- `AWAITING_OWNER_DECISION`
-- `CHANGE_REQUEST_REQUIRED`
+- `AWAITING_OWNER`
+- `CHANGE_REQUEST_PENDING`
 - 或 `TERMINATED_WITH_RISK_REPORT`
 
 ---
@@ -836,15 +839,16 @@ TASK_CREATED
 ### 14.2 异常状态
 
 ```text
-FAILED_BUILD
-FAILED_QA
+FAILED_POLICY
+FAILED_EXECUTION
 FAILED_INFRA
 TIMEOUT
 BUDGET_EXCEEDED
-CHANGE_REQUEST_REQUIRED
+CHANGE_REQUEST_PENDING
 AWAITING_OWNER
-AWAITING_HUMAN_TAKEOVER
-STOPPED_BY_OWNER
+AWAITING_TAKEOVER
+TERMINATED_WITH_RISK_REPORT
+INTEGRITY_FAILED
 ```
 
 ---
@@ -857,11 +861,13 @@ STOPPED_BY_OWNER
 /jobs/<job_id>/
   repo/
   state/
+  approvals/
   artifacts/
   runtime-home/
   DEVELOPMENT_PLAN.en.md
   CONTRACT_FREEZE.en.md
   contract-freeze.json
+  contract-freeze.sha256
   job-manifest.json
   checksums.txt
 ```
@@ -870,32 +876,38 @@ STOPPED_BY_OWNER
 
 ```text
 artifacts/
-  reports/
-    implementation-summary.en.md
-    self-check.en.md
-    qa-report.en.md
-    fixback-items.en.md
-    final-summary.en.md
-
-  logs/
-    builder.log
-    qa.log
-    commands.log
-    compose.log
-
-  evidence/
-    test-results/
-    screenshots/
-    ci-exports/
-
+  runs/
+    <run_id>/
+      reports/
+        handoff.en.md
+        implementation-summary.en.md
+        self-check.en.md
+        qa-report.en.md
+        review-report.en.md
+        fixback-items.en.md
+      logs/
+        command-log.txt
+        worker.log
+      evidence/
+        test-results/
+        screenshots/
+        ci-exports/
+      metadata/
+        task-packet.en.json
+        run-result.json
+        artifact-index.json
+        qa-verdict.json
+        timings.json
+      takeover/
+        takeover-packet.en.md
+        result.en.md
   sessions/
     builder/
     qa/
-
+  final/
+    final-summary.en.md
   metadata/
-    loop-metrics.json
     environment.json
-    timings.json
 ```
 
 ### 15.3 必须校验的对象
@@ -996,7 +1008,7 @@ artifacts/
 ```text
 DETECT_GUI_EXCEPTION
  -> PAUSE_MAIN_LOOP
- -> PREPARE_TAKEOVER_PACKET.en.md
+ -> PREPARE_TAKEOVER_PACKET
  -> OPEN_WUYING_BRIDGE
  -> HUMAN_OR_ASSISTED_ACTION
  -> COLLECT_RESULT
@@ -1139,6 +1151,7 @@ Phase 1 明确不纳入：
 
 ### 20.1 核心蓝图文档
 
+- `README.md`
 - `SYSTEM_BLUEPRINT.md`
 - `ARCHITECTURE_OVERVIEW.md`
 - `DEPLOYMENT_PLAN.md`
@@ -1148,6 +1161,7 @@ Phase 1 明确不纳入：
 - `CONTRACT_POLICY.md`
 - `CHANGE_REQUEST_POLICY.md`
 - `LANGUAGE_BOUNDARY_POLICY.md`
+- `STATUS_MODEL.md`
 - `SECURITY_POLICY.md`
 - `BUDGET_POLICY.md`
 - `APPROVAL_CARD_SPEC.md`
@@ -1155,9 +1169,11 @@ Phase 1 明确不纳入：
 ### 20.3 Loop 与角色文档
 
 - `LOOP_SPEC.md`
+- `STATE_STORE_SPEC.md`
 - `PLANNER_CONTRACT.en.md`
 - `BUILDER_CONTRACT.en.md`
 - `QA_CONTRACT.en.md`
+- `REVIEW_CONTRACT.en.md`
 - `TASK_PACKET_TEMPLATE.en.md`
 - `HANDOFF_TEMPLATE.en.md`
 - `TRACEABILITY_SPEC.md`
@@ -1172,6 +1188,7 @@ Phase 1 明确不纳入：
 
 - `WUYING_INTEGRATION_PLAN.md`
 - `TAKEOVER_FLOW.md`
+- `TAKEOVER_PACKET_TEMPLATE.en.md`
 - `GUI_EXCEPTION_POLICY.md`
 
 ---

@@ -26,7 +26,7 @@ At minimum, the system must carry:
 - `freeze_version`
 - `story_id`
 - `acceptance_id`
-- `run_id` or equivalent run identity
+- `run_id`
 - `artifact_ref`
 - `evidence_ref`
 

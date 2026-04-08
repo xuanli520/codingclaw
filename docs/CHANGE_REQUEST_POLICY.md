@@ -81,6 +81,8 @@ If a change request is rejected or times out:
 - no alternative unapproved path may continue
 - the job moves to `AWAITING_OWNER` or `TERMINATED_WITH_RISK_REPORT`
 
+Job status names in this flow must follow `STATUS_MODEL.md`.
+
 ## Phase 1 Rule
 
 Phase 1 should keep change requests simple:

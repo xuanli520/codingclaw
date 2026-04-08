@@ -11,9 +11,10 @@ Chinese is allowed only in:
 - owner conversations
 - approval prompts
 - mobile reports and summaries
+- archived approval cards, recovery cards, and owner-facing decision summaries kept as control-plane artifacts outside the final engineering delivery bundle
 - control-plane internal notes
 - planning drafts before translation into execution artifacts
-- control-plane blueprint and governance records that stay outside the final engineering delivery package
+- control-plane blueprint and governance records that stay outside `docs/` and outside the final engineering delivery package
 
 ## English-Required Surfaces
 
@@ -48,6 +49,10 @@ Chinese content must not enter:
 - reports
 - handoff files
 - final archived delivery bundles intended for engineering consumers
+
+Chinese control-plane blueprints may remain in the repository only when they are clearly marked as control-plane-only references, kept outside `docs/`, and excluded from final engineering delivery bundles.
+
+Chinese approval artifacts may remain in job archives only when they are stored under control-plane approval paths such as `approvals/` and are excluded from final engineering delivery bundles.
 
 ## QA Enforcement
 

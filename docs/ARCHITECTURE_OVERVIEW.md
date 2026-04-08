@@ -4,6 +4,8 @@
 
 This document describes the runtime architecture of CodingClaw and the boundaries between its control, execution, and audit layers.
 
+`SYSTEM_BLUEPRINT.md` remains the canonical top-level system definition. This document is the runtime expansion view for implementation and deployment work.
+
 ## Top-Level Architecture
 
 ```text
@@ -17,6 +19,11 @@ This document describes the runtime architecture of CodingClaw and the boundarie
    |- Policy Guard
    |- Budget Guard
    |- Channel Adapters
+   |- GUI Exception Gate
+   |
+   +------> [GUI Exception Plane]
+   |          |- Wuying Bridge
+   |          |- Takeover Session
    |
    v
 [Coding Loop Kernel]
@@ -77,6 +84,12 @@ This document describes the runtime architecture of CodingClaw and the boundarie
 - serve as the only long-lived memory source
 - support recovery after crash, timeout, or handoff
 
+### GUI Exception Plane
+
+- handle approved GUI-only interruptions
+- bridge human takeover back into the control shell
+- remain an exception path rather than a default execution surface
+
 ## Runtime Objects
 
 The architecture depends on the following runtime objects:
@@ -86,6 +99,7 @@ The architecture depends on the following runtime objects:
 - Task Packet
 - Approval Card
 - Recovery Card
+- Takeover Packet
 - Run Result
 - Artifact Index
 - Trace Index
@@ -150,7 +164,7 @@ codingclaw/
 1. The owner submits a Chinese request.
 2. The Commander produces an English Development Plan and Chinese summary.
 3. After approval, the control shell generates the Contract Freeze bound to a baseline.
-4. The loop kernel selects one story and emits `task-packet.en.json`.
+4. The loop kernel selects one story, allocates `run_id`, and emits `task-packet.en.json`.
 5. A worker executes the story through an adapter.
 6. The worker returns outputs, evidence, and a standardized exit status.
 7. QA validates scope, reproducibility, language policy, and evidence closure.
@@ -172,6 +186,7 @@ Phase 1 ships a single-node topology:
 - local or same-host Docker workers
 - one active job at a time
 - one active story at a time
+- GUI exception handling documented as a governed pause-and-takeover path
 - local artifact volume plus SQLite or Postgres metadata
 
 This keeps the first release small enough to verify end-to-end governance before scaling scheduler complexity.
