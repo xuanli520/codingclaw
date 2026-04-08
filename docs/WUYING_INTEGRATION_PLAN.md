@@ -4,6 +4,8 @@
 
 This document defines how Aliyun Wuying Desktop fits into CodingClaw as a GUI exception and human takeover surface.
 
+Official feasibility references for this positioning are collected in [OFFICIAL_REFERENCE_NOTES.md](OFFICIAL_REFERENCE_NOTES.md).
+
 ## Positioning
 
 Wuying is not the primary builder environment. It exists for:
@@ -42,6 +44,8 @@ The integration should define:
 
 - no active Wuying automation
 - only reserve document hooks and policy definitions
+- keep Wuying limited to approved takeover and remote assistance paths
+- do not depend on undocumented Wuying-native orchestration for resume control
 
 ### Phase 2
 

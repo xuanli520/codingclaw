@@ -9,8 +9,11 @@ Start with these documents in order:
 3. [CONTRACT_POLICY.md](CONTRACT_POLICY.md)
 4. [EXECUTOR_ADAPTER_CONTRACT.md](EXECUTOR_ADAPTER_CONTRACT.md)
 5. [DEPLOYMENT_PLAN.md](DEPLOYMENT_PLAN.md)
+6. [OFFICIAL_REFERENCE_NOTES.md](OFFICIAL_REFERENCE_NOTES.md)
 
 [SYSTEM_BLUEPRINT.md](SYSTEM_BLUEPRINT.md) is the canonical top-level definition. The other documents refine specific parts of that model.
+
+[OFFICIAL_REFERENCE_NOTES.md](OFFICIAL_REFERENCE_NOTES.md) collects vendor and platform references that support the feasibility of the current design without redefining the repository contracts.
 
 ## Governance
 
@@ -49,6 +52,10 @@ Start with these documents in order:
 - [WUYING_INTEGRATION_PLAN.md](WUYING_INTEGRATION_PLAN.md)
 - [TAKEOVER_FLOW.md](TAKEOVER_FLOW.md)
 - [TAKEOVER_PACKET_TEMPLATE.en.md](TAKEOVER_PACKET_TEMPLATE.en.md)
+
+## External Validation
+
+- [OFFICIAL_REFERENCE_NOTES.md](OFFICIAL_REFERENCE_NOTES.md)
 
 ## Control-Plane Chinese Reference
 

@@ -4,6 +4,8 @@
 
 This document defines the recommended deployment path for CodingClaw from local development to a stable single-node production baseline.
 
+Official feasibility references for Docker, SQLite, and PostgreSQL are collected in [OFFICIAL_REFERENCE_NOTES.md](OFFICIAL_REFERENCE_NOTES.md).
+
 ## Deployment Principles
 
 - deploy the smallest auditable loop first
@@ -39,13 +41,17 @@ Each worker mounts:
 - `/work/cache`
 - `/work/runtime-home`
 
+Phase 1 should prefer bind mounts for `repo`, `state`, and `artifacts` so the control shell and the host can inspect them directly.
+
+Cache paths or other container-owned persistent data may move to Docker volumes when direct host-side inspection is not required.
+
 ### Data Services
 
 Phase 1 may use:
 
 - local volume storage for repo, state, and artifacts
-- SQLite for simple metadata
-- Postgres if multi-process coordination is needed
+- SQLite for single-node, local metadata with low write concurrency
+- Postgres when multi-process or multi-client coordination, higher write concurrency, or a true client/server deployment model is required
 
 Redis is optional and not required for the first release.
 

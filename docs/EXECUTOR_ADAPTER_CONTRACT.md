@@ -16,6 +16,7 @@ It complements:
 - [ARCHITECTURE_OVERVIEW.md](ARCHITECTURE_OVERVIEW.md)
 - [TASK_PACKET_TEMPLATE.en.md](TASK_PACKET_TEMPLATE.en.md)
 - [STATUS_MODEL.md](STATUS_MODEL.md)
+- [OFFICIAL_REFERENCE_NOTES.md](OFFICIAL_REFERENCE_NOTES.md)
 
 ## Core Rule
 
@@ -111,6 +112,10 @@ The adapter must treat the task packet as the run-scoped execution contract for:
 ## Capability Manifest
 
 Every adapter must explicitly declare its capabilities.
+
+The capability manifest is scoped to a concrete adapter profile rather than an executor family in the abstract.
+
+If one adapter can run against multiple model, runtime, or deployment profiles, it must publish a distinct capability manifest for each supported profile instead of implying one universal tool surface.
 
 The capability set must cover at least:
 

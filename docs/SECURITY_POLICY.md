@@ -24,6 +24,9 @@ This policy defines the minimum security model for CodingClaw control, worker ex
 
 - each job runs in an isolated worker context
 - repo workspace, runtime home, cache, and artifact paths must not be shared across unrelated jobs
+- immutable or control-plane-owned inputs should prefer read-only mounts where possible
+- paths that must remain directly inspectable by the host or control shell may use bind mounts
+- cache or other container-owned persistent data may use Docker volumes instead of additional bind mounts
 - workers must be disposable and restartable
 
 ### Credential Model
