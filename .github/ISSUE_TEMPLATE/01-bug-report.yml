@@ -1,0 +1,119 @@
+name: Bug report
+description: Report a reproducible defect in the CodingClaw control shell, loop kernel, archive flow, adapter layer, or specs.
+title: "[bug] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form for wrong behavior in repository code, workflow logic, archived outputs, or contract/spec alignment.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-checks
+      options:
+        - label: I searched existing issues and did not find a duplicate.
+          required: true
+        - label: I checked the relevant docs under docs/ before filing this report.
+          required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      options:
+        - control shell
+        - loop kernel
+        - adapters
+        - archive and metadata
+        - tests and harness
+        - GitHub Actions and CI
+        - docs and specs
+        - unknown
+    validations:
+      required: true
+  - type: input
+    id: identifiers
+    attributes:
+      label: Identifiers
+      description: Include job_id, run_id, story_id, approval_card_id, or workflow run URL if available.
+      placeholder: job-phase1-local, run-001, STORY-..., https://github.com/...
+    validations:
+      required: false
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: Describe the defect in one or two sentences.
+      placeholder: Phase 1 rerun mutates an existing archive instead of rejecting the rerun.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: List the exact commands, inputs, or clicks needed to reproduce.
+      placeholder: |
+        1. Check out commit ...
+        2. Run ...
+        3. Open ...
+        4. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include OS, Python version, Bun version, branch or commit, and whether this is local or GitHub Actions.
+      render: shell
+      placeholder: |
+        OS:
+        Python:
+        Bun:
+        Branch or commit:
+        Execution surface:
+    validations:
+      required: true
+  - type: dropdown
+    id: contract-impact
+    attributes:
+      label: Contract or spec impact
+      options:
+        - no known contract impact
+        - existing contract is violated
+        - contract or spec is ambiguous
+        - unknown
+    validations:
+      required: true
+  - type: textarea
+    id: related-specs
+    attributes:
+      label: Related docs or paths
+      description: Point to relevant files such as docs/SYSTEM_BLUEPRINT.md, docs/LOOP_SPEC.md, .github/workflows/verify.yml, or specific source files.
+      placeholder: docs/LOOP_SPEC.md, core/loop/phase1-local-flow.ts, .github/workflows/verify.yml
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs or output
+      render: shell
+    validations:
+      required: false
+  - type: upload
+    id: attachments
+    attributes:
+      label: Attachments
+      description: Upload screenshots, logs, trace files, or archived artifacts if they help reproduction.
+    validations:
+      required: false
