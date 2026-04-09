@@ -37,6 +37,10 @@ export const JOB_STATES = [
 
 export type JobState = (typeof JOB_STATES)[number];
 
+export const APPROVAL_CARD_STATES = ["PENDING", "DECIDED", "EXPIRED", "CANCELLED"] as const;
+
+export type ApprovalCardState = (typeof APPROVAL_CARD_STATES)[number];
+
 export type TraceState = "pass" | "fail" | "blocked";
 
 export interface StoryContract {
@@ -211,6 +215,172 @@ export interface LoopMetricEntry {
 export interface LoopMetricsFile {
   job_id: string;
   runs: LoopMetricEntry[];
+}
+
+export interface ApprovalCardSnapshot {
+  job_id: string;
+  card_id: string;
+  card_state: ApprovalCardState;
+  card_type: string;
+  story_id: string | null;
+  freeze_version: string | null;
+  risk_level: string;
+  summary_zh: string;
+  requested_action: string;
+  candidate_actions: string[];
+  timeout_at: string;
+  created_at: string;
+  evidence_refs: string[];
+}
+
+export interface ApprovalDecisionReceipt {
+  job_id: string;
+  card_id: string;
+  card_type: string;
+  story_id: string | null;
+  freeze_version: string | null;
+  decision: string;
+  actor: string;
+  decided_at: string;
+  card_state: ApprovalCardState;
+  requested_action: string;
+}
+
+export interface ContractFreezeMetadata {
+  job_id: string;
+  freeze_id: string;
+  freeze_version: string;
+  plan_path: string;
+  base_branch: string;
+  base_commit: string;
+  dependency_snapshot_digest: string;
+  approved_adapters: string[];
+  approved_run_roles: RunRole[];
+  adapter_versions: Record<string, string>;
+  task_packet_digests: Record<string, string>;
+  story_ids: string[];
+  acceptance_ids: string[];
+  in_scope_items: string[];
+  out_of_scope_items: string[];
+  quality_bar: string[];
+  delivery_artifacts: string[];
+  language_policy: string;
+  budget_limits: Record<string, unknown>;
+  time_limits: Record<string, unknown>;
+  approval_card_id: string;
+  approved_at: string;
+}
+
+export interface ChecksumRecord {
+  algorithm: "sha256";
+  path: string;
+  hash: string;
+}
+
+export interface JobManifestPlanRecord {
+  path: string;
+  checksum: string;
+  approval_card_id: string;
+  summary_zh_ref: string;
+  approval_state: ApprovalCardState;
+  approved_at: string;
+}
+
+export interface JobManifestFreezeRecord {
+  freeze_id: string;
+  version: string;
+  path: string;
+  json_path: string;
+  checksum_path: string;
+  hash: string;
+  approval_card_id: string;
+  approved_at: string;
+}
+
+export interface JobManifestStoryRecord {
+  story_id: string;
+  queue_state: JobState;
+  acceptance_ids: string[];
+  latest_run_id: string;
+  latest_run_role: RunRole;
+  latest_run_status: RunExitStatus | "PENDING";
+  latest_evidence_refs: string[];
+  last_updated_at: string;
+}
+
+export interface JobManifestPauseContext {
+  is_paused: boolean;
+  pause_reason: string | null;
+  waiting_on: string | null;
+  resume_action: string | null;
+  paused_at: string | null;
+  related_card_id: string | null;
+  expires_at: string | null;
+}
+
+export interface JobManifestRunRecord {
+  run_id: string;
+  run_role: RunRole;
+  story_id: string;
+  run_exit_status: RunExitStatus;
+  root: string;
+  task_packet_path: string;
+  run_result_path: string;
+  artifact_index_path: string;
+  handoff_path: string;
+  takeover_packet_path: string | null;
+  started_at: string;
+  ended_at: string;
+}
+
+export interface JobManifestApprovalRecord {
+  card_id: string;
+  card_state: ApprovalCardState;
+  card_type: string;
+  requested_action: string;
+  decision: string;
+  snapshot_path: string;
+  decision_path: string;
+  summary_zh_ref: string;
+  decided_at: string;
+}
+
+export interface JobManifestArtifactRecord {
+  runs_root: string;
+  sessions_root: string;
+  final_root: string;
+  shared_metadata_refs: string[];
+  latest_final_summary: string | null;
+}
+
+export interface JobManifest {
+  job_id: string;
+  project_id: string;
+  created_at: string;
+  updated_at: string;
+  owner_channel: string;
+  status: JobState;
+  current_freeze_version: string;
+  base_branch: string;
+  base_commit: string;
+  active_story_id: string;
+  current_run_id: string;
+  approved_adapter_set: string[];
+  pause_context: JobManifestPauseContext;
+  language_policy: string;
+  budget_limits: Record<string, unknown>;
+  time_limits: Record<string, unknown>;
+  repo_root: string;
+  state_root: string;
+  approvals_root: string;
+  artifact_root: string;
+  checksum_file: string;
+  plan: JobManifestPlanRecord;
+  freeze: JobManifestFreezeRecord;
+  stories: JobManifestStoryRecord[];
+  runs: JobManifestRunRecord[];
+  approvals: JobManifestApprovalRecord[];
+  artifacts: JobManifestArtifactRecord;
 }
 
 export interface AdapterExecutionResult {

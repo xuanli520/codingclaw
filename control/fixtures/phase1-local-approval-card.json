@@ -1,10 +1,21 @@
 {
+  "job_id": "job-phase1-local",
   "card_id": "card-phase1-local-001",
+  "card_state": "DECIDED",
+  "card_type": "plan-approval",
   "story_id": "STORY-PHASE1-LOCAL-001",
-  "status_family": "approval_state",
-  "status": "DECIDED",
-  "card_type": "story-approval",
-  "requested_action": "Approve the fixed local Phase 1 proof-of-concept story.",
-  "decision": "approved",
-  "decided_at": "2026-04-08T00:00:00Z"
+  "freeze_version": "1",
+  "risk_level": "low",
+  "summary_zh": "请审批本地 Phase 1 单故事 builder 到 QA 验证流程，并允许生成冻结契约后执行。",
+  "requested_action": "Approve the fixed local Phase 1 proof-of-concept story and allow the builder-to-QA execution flow.",
+  "candidate_actions": [
+    "approve",
+    "reject",
+    "request revision"
+  ],
+  "timeout_at": "2026-04-10T00:00:00Z",
+  "created_at": "2026-04-08T00:00:00Z",
+  "evidence_refs": [
+    "DEVELOPMENT_PLAN.en.md"
+  ]
 }

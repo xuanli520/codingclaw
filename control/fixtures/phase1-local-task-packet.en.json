@@ -1,7 +1,7 @@
 {
   "job_id": "job-phase1-local",
   "freeze_id": "freeze-phase1-local",
-  "freeze_version": "phase1-local-v1",
+  "freeze_version": "1",
   "story_id": "STORY-PHASE1-LOCAL-001",
   "run_role": "__RUN_ROLE__",
   "run_attempt": "__RUN_ATTEMPT__",
