@@ -5,6 +5,7 @@ import type {
   ContainerPathMount,
   ContainerRuntimeConfig,
   RunEnvelope,
+  RunExitStatus,
   RunRole,
 } from "../../core/contracts/types.ts";
 
@@ -13,6 +14,7 @@ const CONTAINER_PATHS = {
   state: "/work/state",
   artifacts: "/work/artifacts",
   runtimeHome: "/work/runtime-home",
+  cache: "/work/cache",
 } as const;
 
 const DEFAULT_BASE_IMAGE = "codingclaw-worker-base:phase1-local";
@@ -59,6 +61,15 @@ export interface DockerWorkerLaunchResult {
   exitCode: number;
   stdout: string;
   stderr: string;
+  failure_status: RunExitStatus | null;
+}
+
+interface CommandExecutionResult {
+  command: string[];
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+  spawn_error: string | null;
 }
 
 function normalizeHostPath(value: string): string {
@@ -147,6 +158,12 @@ export function buildDockerPathMapping(envelope: RunEnvelope): DockerPathMapper 
       container_path: CONTAINER_PATHS.runtimeHome,
       read_only: false,
     },
+    {
+      name: "cache",
+      host_path: join(envelope.runtime_home, "cache"),
+      container_path: CONTAINER_PATHS.cache,
+      read_only: false,
+    },
   ]);
 }
 
@@ -168,6 +185,7 @@ export async function materializeContainerizedRunEnvelope(
 ): Promise<ContainerizedRunEnvelopeMaterialization> {
   const hostEnvelopePath = join(envelope.runtime_home, "envelopes", `${envelope.run_id}.json`);
   const containerEnvelopePath = join(envelope.runtime_home, "envelopes", "container", `${envelope.run_id}.json`);
+  const cacheHostPath = join(envelope.runtime_home, "cache");
   const mapper = buildDockerPathMapping(envelope);
   const runtime: ContainerRuntimeConfig = {
     runtime: "docker",
@@ -198,6 +216,7 @@ export async function materializeContainerizedRunEnvelope(
 
   await ensureDir(dirname(hostEnvelopePath));
   await ensureDir(dirname(containerEnvelopePath));
+  await ensureDir(cacheHostPath);
   await writeJson(hostEnvelopePath, hostEnvelope);
   await writeJson(containerEnvelopePath, containerEnvelope);
 
@@ -222,22 +241,52 @@ function mountArg(mount: ContainerPathMount): string {
   return `type=bind,source=${mount.host_path},target=${mount.container_path}${mode}`;
 }
 
-async function spawnCommand(command: string[], cwd: string): Promise<DockerWorkerLaunchResult> {
-  const handle = Bun.spawn({
-    cmd: command,
-    cwd,
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const stdoutPromise = new Response(handle.stdout).text();
-  const stderrPromise = new Response(handle.stderr).text();
-  const exitCode = await handle.exited;
-  return {
-    command,
-    exitCode,
-    stdout: await stdoutPromise,
-    stderr: await stderrPromise,
-  };
+async function spawnCommand(command: string[], cwd: string): Promise<CommandExecutionResult> {
+  try {
+    const handle = Bun.spawn({
+      cmd: command,
+      cwd,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const stdoutPromise = new Response(handle.stdout).text();
+    const stderrPromise = new Response(handle.stderr).text();
+    const exitCode = await handle.exited;
+    return {
+      command,
+      exitCode,
+      stdout: await stdoutPromise,
+      stderr: await stderrPromise,
+      spawn_error: null,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      command,
+      exitCode: -1,
+      stdout: "",
+      stderr: message,
+      spawn_error: message,
+    };
+  }
+}
+
+function classifyRunFailure(result: CommandExecutionResult): RunExitStatus | null {
+  if (result.exitCode === 0) {
+    return null;
+  }
+  if (result.spawn_error) {
+    return "FAILED_INFRA";
+  }
+  const stderr = result.stderr.trim();
+  if (
+    /^\s*docker:/iu.test(stderr) ||
+    /cannot connect to the docker daemon/iu.test(stderr) ||
+    /error during connect/iu.test(stderr)
+  ) {
+    return "FAILED_INFRA";
+  }
+  return "FAILED_EXECUTION";
 }
 
 export class DockerWorkerLauncher implements RoleImageResolver {
@@ -256,40 +305,60 @@ export class DockerWorkerLauncher implements RoleImageResolver {
     return resolveDockerWorkerImage(runRole);
   }
 
-  private async ensureImage(image: string, dockerfilePath: string, buildArgs: string[] = []): Promise<void> {
+  private async ensureImage(
+    image: string,
+    dockerfilePath: string,
+    buildArgs: string[] = [],
+  ): Promise<CommandExecutionResult | null> {
     if (this.preparedImages.has(image)) {
-      return;
+      return null;
     }
 
     const inspect = await spawnCommand([this.dockerExecutable, "image", "inspect", image], this.repoRoot);
+    if (inspect.spawn_error) {
+      return inspect;
+    }
     if (inspect.exitCode === 0) {
       this.preparedImages.add(image);
-      return;
+      return null;
     }
 
     const build = await spawnCommand(
       [this.dockerExecutable, "build", "--file", dockerfilePath, "--tag", image, ...buildArgs, this.repoRoot],
       this.repoRoot,
     );
-    if (build.exitCode !== 0) {
-      throw new Error(build.stderr.trim() || `failed to build docker image ${image}`);
+    if (build.spawn_error || build.exitCode !== 0) {
+      return build;
     }
     this.preparedImages.add(image);
+    return null;
   }
 
-  private async ensureRoleImage(runRole: RunRole, image: string): Promise<void> {
+  private async ensureRoleImage(runRole: RunRole, image: string): Promise<CommandExecutionResult | null> {
     if (runRole !== "builder" && runRole !== "qa") {
       throw new Error(`unsupported docker worker role: ${runRole}`);
     }
-    await this.ensureImage(this.baseImage, buildImageDockerfile(this.repoRoot, "base"));
-    await this.ensureImage(image, buildImageDockerfile(this.repoRoot, runRole), [
+    const baseFailure = await this.ensureImage(this.baseImage, buildImageDockerfile(this.repoRoot, "base"));
+    if (baseFailure) {
+      return baseFailure;
+    }
+    return this.ensureImage(image, buildImageDockerfile(this.repoRoot, runRole), [
       "--build-arg",
       `CODINGCLAW_BASE_IMAGE=${this.baseImage}`,
     ]);
   }
 
   async launch(request: DockerWorkerLaunchRequest): Promise<DockerWorkerLaunchResult> {
-    await this.ensureRoleImage(request.run_role, request.image);
+    const imagePreparationFailure = await this.ensureRoleImage(request.run_role, request.image);
+    if (imagePreparationFailure) {
+      return {
+        command: imagePreparationFailure.command,
+        exitCode: imagePreparationFailure.exitCode,
+        stdout: imagePreparationFailure.stdout,
+        stderr: imagePreparationFailure.stderr,
+        failure_status: "FAILED_INFRA",
+      };
+    }
 
     const command = [
       this.dockerExecutable,
@@ -302,15 +371,22 @@ export class DockerWorkerLauncher implements RoleImageResolver {
       "--env",
       "HOME=/work/runtime-home/home",
       "--env",
-      "XDG_CACHE_HOME=/work/runtime-home/cache",
+      "XDG_CACHE_HOME=/work/cache",
       "--env",
-      "BUN_INSTALL_CACHE_DIR=/work/runtime-home/cache/bun",
+      "BUN_INSTALL_CACHE_DIR=/work/cache/bun",
       ...request.runtime.mounts.flatMap((mount) => ["--mount", mountArg(mount)]),
       request.image,
       "bun",
       request.worker_script_path,
       request.envelope_path,
     ];
-    return spawnCommand(command, this.repoRoot);
+    const run = await spawnCommand(command, this.repoRoot);
+    return {
+      command: run.command,
+      exitCode: run.exitCode,
+      stdout: run.stdout,
+      stderr: run.stderr,
+      failure_status: classifyRunFailure(run),
+    };
   }
 }

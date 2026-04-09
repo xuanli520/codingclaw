@@ -10,7 +10,7 @@ import type {
   RunTimingMetadata,
   WorkerOutput,
 } from "../../core/contracts/types.ts";
-import { DockerWorkerLauncher, materializeContainerizedRunEnvelope } from "./docker-runtime.ts";
+import { DockerWorkerLauncher, type DockerWorkerLaunchResult, materializeContainerizedRunEnvelope } from "./docker-runtime.ts";
 
 function workerScriptForRole(rootPath: string, runRole: RunRole): string {
   if (runRole === "builder") {
@@ -35,6 +35,32 @@ function fallbackWorkerOutput(errorText: string, status: WorkerOutput["status"] 
     report_paths: [],
     test_result_paths: [],
     fixback_items: [],
+  };
+}
+
+function formatErrorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function launchFailureText(launchResult: DockerWorkerLaunchResult): string {
+  const stderr = launchResult.stderr.trim();
+  if (stderr) {
+    return stderr;
+  }
+  const stdout = launchResult.stdout.trim();
+  if (stdout) {
+    return stdout;
+  }
+  return `launcher exited with code ${launchResult.exitCode}`;
+}
+
+function unexpectedLaunchResult(error: unknown): DockerWorkerLaunchResult {
+  return {
+    command: ["<launcher-error>"],
+    exitCode: -1,
+    stdout: "",
+    stderr: formatErrorText(error),
+    failure_status: "FAILED_INFRA",
   };
 }
 
@@ -131,13 +157,18 @@ export class GenericCliAdapter {
     );
 
     const startedAtDate = new Date();
-    const launchResult = await this.dockerLauncher.launch({
-      run_role: materialization.container_envelope.run_role,
-      image: materialization.runtime.image,
-      worker_script_path: workerScript,
-      envelope_path: materialization.runtime.envelope_container_path,
-      runtime: materialization.runtime,
-    });
+    let launchResult: DockerWorkerLaunchResult;
+    try {
+      launchResult = await this.dockerLauncher.launch({
+        run_role: materialization.container_envelope.run_role,
+        image: materialization.runtime.image,
+        worker_script_path: workerScript,
+        envelope_path: materialization.runtime.envelope_container_path,
+        runtime: materialization.runtime,
+      });
+    } catch (error) {
+      launchResult = unexpectedLaunchResult(error);
+    }
     const exitCode = launchResult.exitCode;
     const stdout = launchResult.stdout;
     const stderr = launchResult.stderr;
@@ -151,7 +182,7 @@ export class GenericCliAdapter {
         workerOutput = fallbackWorkerOutput("worker output was not valid JSON");
       }
     } else {
-      workerOutput = fallbackWorkerOutput(stderr);
+      workerOutput = fallbackWorkerOutput(launchFailureText(launchResult), launchResult.failure_status ?? "FAILED_EXECUTION");
     }
 
     const durationMs = Math.max(0, endedAtDate.getTime() - startedAtDate.getTime());
