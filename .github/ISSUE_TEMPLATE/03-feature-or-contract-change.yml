@@ -1,0 +1,109 @@
+name: Feature or contract change
+description: Propose a new capability or a deliberate change to CodingClaw workflow, contracts, archive structure, or governance rules.
+title: "[proposal] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form for planned behavior changes. If the current behavior is wrong, use the bug report instead.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-checks
+      options:
+        - label: I searched existing issues and open pull requests.
+          required: true
+        - label: I reviewed the relevant docs under docs/ and this is a real behavior gap or planned change.
+          required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Change area
+      options:
+        - control shell
+        - loop kernel
+        - execution workers
+        - executor adapter contract
+        - archive and metadata
+        - GitHub workflows and repo governance
+        - docs and specifications
+        - other
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem statement
+      description: What concrete limitation, risk, or missing capability should this change solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: Describe the expected behavior, not the implementation details only.
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Expected operator or user outcome
+      description: Explain what becomes easier, safer, faster, or more auditable after this lands.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance signals
+      description: List the checks, artifacts, or behaviors that would prove the change is complete.
+      placeholder: |
+        - verify passes
+        - artifact layout remains valid
+        - job-manifest.json records ...
+    validations:
+      required: true
+  - type: dropdown
+    id: contract-impact
+    attributes:
+      label: Contract impact
+      options:
+        - no contract or spec change
+        - spec text update only
+        - contract, schema, or path shape change
+        - governance or approval policy change
+    validations:
+      required: true
+  - type: dropdown
+    id: specs
+    attributes:
+      label: Related specs
+      description: Select any docs that are likely to change.
+      multiple: true
+      options:
+        - docs/SYSTEM_BLUEPRINT.md
+        - docs/ARCHITECTURE_OVERVIEW.md
+        - docs/CONTRACT_POLICY.md
+        - docs/LOOP_SPEC.md
+        - docs/EXECUTOR_ADAPTER_CONTRACT.md
+        - docs/ARTIFACT_LAYOUT_SPEC.md
+        - docs/JOB_MANIFEST_SCHEMA.md
+        - docs/STATUS_MODEL.md
+        - docs/SECURITY_POLICY.md
+        - docs/README.md
+        - another file
+    validations:
+      required: false
+  - type: textarea
+    id: non-goals
+    attributes:
+      label: Non-goals or exclusions
+      description: Make it explicit what this issue does not attempt to solve.
+    validations:
+      required: false
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Link related issues, external references, workflow runs, or prior design notes.
+    validations:
+      required: false

@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Read the documentation map
+    url: https://github.com/xuanli520/codingclaw/blob/main/docs/README.md
+    about: Start here before opening a question or architecture-level change request.
+  - name: Review the system blueprint
+    url: https://github.com/xuanli520/codingclaw/blob/main/docs/SYSTEM_BLUEPRINT.md
+    about: Use this before reporting contract, workflow, or lifecycle issues.

@@ -14,6 +14,8 @@ export interface JobRootLayout {
   sessionsRoot: string;
   finalRoot: string;
   artifactMetadataRoot: string;
+  environmentPath: string;
+  finalSummaryPath: string;
   runtimeHomeRoot: string;
   planPath: string;
   freezePath: string;
@@ -52,6 +54,8 @@ export function resolveJobRootLayout(repoRoot: string, jobId: string): JobRootLa
     sessionsRoot,
     finalRoot,
     artifactMetadataRoot,
+    environmentPath: join(artifactMetadataRoot, "environment.json"),
+    finalSummaryPath: join(finalRoot, "final-summary.en.md"),
     runtimeHomeRoot,
     planPath: join(jobRoot, "DEVELOPMENT_PLAN.en.md"),
     freezePath: join(jobRoot, "CONTRACT_FREEZE.en.md"),

@@ -1,11 +1,16 @@
 import { join } from "node:path";
 import { GenericCliAdapter } from "../../adapters/generic-cli/adapter.ts";
 import { writeApprovalArchive } from "../../ops/archive/approvals.ts";
+import {
+  buildEnvironmentSnapshotMetadata,
+  buildFinalSummaryMetadata,
+  finalizeArchive,
+} from "../../ops/archive/finalization.ts";
 import { writeContractFreeze } from "../../ops/archive/freeze.ts";
 import { ensureJobRootLayout, resolveJobRootLayout } from "../../ops/archive/job-root.ts";
 import { writeJobManifest } from "../../ops/archive/manifest.ts";
 import { writeDevelopmentPlan } from "../../ops/archive/plan.ts";
-import { verifyChecksumFile, writeChecksumFile, sha256File } from "../../ops/checksums/sha256.ts";
+import { createChecksumRecords, verifyChecksumFile, writeChecksumFile, sha256File } from "../../ops/checksums/sha256.ts";
 import { StateStore } from "./state-store.ts";
 import { mapRunExitToJobState } from "../contracts/status.ts";
 import {
@@ -43,7 +48,9 @@ import type {
 
 const BUILDER_EXPECTED_ARTIFACTS = [
   "logs/command-log.txt",
+  "logs/worker.log",
   "metadata/task-packet.en.json",
+  "metadata/timings.json",
   "metadata/run-result.json",
   "metadata/artifact-index.json",
   "reports/handoff.en.md",
@@ -53,6 +60,8 @@ const BUILDER_EXPECTED_ARTIFACTS = [
 ];
 
 const BUILDER_VERIFICATION_TARGETS = [
+  "logs/worker.log",
+  "metadata/timings.json",
   "metadata/run-result.json",
   "metadata/artifact-index.json",
   "reports/handoff.en.md",
@@ -62,7 +71,9 @@ const BUILDER_VERIFICATION_TARGETS = [
 
 const QA_EXPECTED_ARTIFACTS = [
   "logs/command-log.txt",
+  "logs/worker.log",
   "metadata/task-packet.en.json",
+  "metadata/timings.json",
   "metadata/run-result.json",
   "metadata/artifact-index.json",
   "metadata/qa-verdict.json",
@@ -72,12 +83,16 @@ const QA_EXPECTED_ARTIFACTS = [
 ];
 
 const QA_VERIFICATION_TARGETS = [
+  "logs/worker.log",
+  "metadata/timings.json",
   "metadata/run-result.json",
   "metadata/artifact-index.json",
   "metadata/qa-verdict.json",
   "reports/handoff.en.md",
   "reports/qa-report.en.md",
 ];
+
+const DEPENDENCY_SNAPSHOT_INPUTS = ["package.json", "bun.lock", "pyproject.toml", "uv.lock"] as const;
 
 function roleArtifacts(runRole: RunRole): { expectedArtifacts: string[]; verificationTargets: string[] } {
   if (runRole === "builder") {
@@ -112,11 +127,31 @@ async function loadAdapterInfo(repoRoot: string): Promise<{ adapter_id: string; 
 }
 
 async function buildDependencySnapshotDigest(repoRoot: string): Promise<string> {
-  const packageJsonPath = join(repoRoot, "package.json");
-  if (await pathExists(packageJsonPath)) {
-    return sha256File(packageJsonPath);
+  const inputs: string[] = [];
+  for (const relativePath of DEPENDENCY_SNAPSHOT_INPUTS) {
+    const absolutePath = join(repoRoot, relativePath);
+    if (await pathExists(absolutePath)) {
+      inputs.push(`${relativePath}:${await sha256File(absolutePath)}`);
+    }
+  }
+  if (inputs.length > 0) {
+    return sha256Text(inputs.join("\n"));
   }
   return "absent";
+}
+
+async function assertFreshJobRoot(layout: ReturnType<typeof resolveJobRootLayout>): Promise<void> {
+  if (!(await pathExists(layout.jobRoot))) {
+    return;
+  }
+  const archivedFiles = await collectRelativeFiles(layout.jobRoot);
+  if (archivedFiles.length === 0) {
+    return;
+  }
+  const sample = archivedFiles.slice(0, 5).join(", ");
+  throw new Error(
+    `job root already contains archived files under jobs/${layout.jobId}/: ${sample}. remove the existing job root or use a new job_id/freeze_version before rerunning phase1`,
+  );
 }
 
 async function buildTaskPacket(
@@ -210,6 +245,14 @@ async function normalizeRunArtifacts(
   if (!commandLogPath.startsWith(runRootRelative)) {
     throw new Error("run command log escaped the canonical job root");
   }
+  const workerLogPath = layout.relativeToJobRoot(join(execution.runRoot, "logs", "worker.log"));
+  if (!workerLogPath.startsWith(runRootRelative)) {
+    throw new Error("run worker log escaped the canonical job root");
+  }
+  const timingsPath = layout.relativeToJobRoot(join(execution.runRoot, "metadata", "timings.json"));
+  if (!timingsPath.startsWith(runRootRelative)) {
+    throw new Error("run timings metadata escaped the canonical job root");
+  }
 
   return execution;
 }
@@ -260,6 +303,8 @@ function buildFreezeMetadata(
       "approvals/<card_id>/approval-card.json",
       "approvals/<card_id>/decision.json",
       "approvals/<card_id>/summary.zh.md",
+      "artifacts/final/final-summary.en.md",
+      "artifacts/metadata/environment.json",
       ...BUILDER_EXPECTED_ARTIFACTS,
       ...QA_EXPECTED_ARTIFACTS,
     ]),
@@ -468,6 +513,7 @@ async function buildChecksumRecords(
   freezeRecord: Awaited<ReturnType<typeof writeContractFreeze>>,
   approvalRecord: Awaited<ReturnType<typeof writeApprovalArchive>>,
   executions: AdapterExecutionResult[],
+  extraRelativePaths: string[] = [],
 ): Promise<ChecksumRecord[]> {
   const runRelativePaths: string[] = [];
   for (const execution of executions) {
@@ -488,17 +534,10 @@ async function buildChecksumRecords(
     layout.relativeToJobRoot(approvalRecord.summary_path),
     "job-manifest.json",
     ...runRelativePaths,
+    ...extraRelativePaths,
   ]);
 
-  const records: ChecksumRecord[] = [];
-  for (const relativePath of relativePaths) {
-    records.push({
-      algorithm: "sha256",
-      path: relativePath,
-      hash: await sha256File(join(layout.jobRoot, relativePath)),
-    });
-  }
-  return records;
+  return createChecksumRecords(layout.jobRoot, relativePaths);
 }
 
 export interface Phase1RunSummary {
@@ -521,6 +560,7 @@ export async function runPhase1Local(repoRoot: string): Promise<Phase1RunSummary
   );
   const decision = buildApprovalDecision(approvalCard);
   const layout = resolveJobRootLayout(repoRoot, approvalCard.job_id);
+  await assertFreshJobRoot(layout);
   await ensureJobRootLayout(layout);
 
   const builderRunId = createRunId("builder");
@@ -553,6 +593,8 @@ export async function runPhase1Local(repoRoot: string): Promise<Phase1RunSummary
   const allExpectedArtifacts = uniqueStrings([
     ...builderTaskPacket.story.expected_artifacts,
     ...qaTaskPacket.story.expected_artifacts,
+    "artifacts/final/final-summary.en.md",
+    "artifacts/metadata/environment.json",
   ]);
   const dependencySnapshotDigest = await buildDependencySnapshotDigest(repoRoot);
   const planRecord = await writeDevelopmentPlan(layout.planPath, {
@@ -573,7 +615,7 @@ export async function runPhase1Local(repoRoot: string): Promise<Phase1RunSummary
       "Write the fixed plan and approval archive.",
       "Generate the contract freeze and checksum outputs before execution.",
       "Run builder then QA and archive both run bundles under artifacts/runs/<run_id>/.",
-      "Write job-manifest.json and checksums.txt for the complete fixed local job bundle.",
+      "Finalize the archive with environment metadata, final summary, job-manifest.json, and checksums.txt.",
     ],
     storyId: builderTaskPacket.story.story_id,
     storyObjective: builderTaskPacket.story.story_objective,
@@ -584,7 +626,7 @@ export async function runPhase1Local(repoRoot: string): Promise<Phase1RunSummary
     expectedArtifacts: allExpectedArtifacts,
     risks: [
       "The canonical handoff path must remain relative to the job root even though the worker adapter writes from the repository root.",
-      "Checksums must be regenerated after the manifest and run bundles stabilize.",
+      "Checksums must be regenerated after the final summary, environment snapshot, manifest, and run bundles stabilize.",
     ],
     openQuestions: ["none"],
     approvalRequested: approvalCard.requested_action,
@@ -683,7 +725,35 @@ export async function runPhase1Local(repoRoot: string): Promise<Phase1RunSummary
   );
   await writeJobManifest(layout.manifestPath, finalManifest);
 
-  const checksumRecords = await buildChecksumRecords(layout, planRecord, freezeRecord, approvalRecord, executions);
+  let manifestForChecksums = finalManifest;
+  const extraChecksumPaths: string[] = [];
+  if (qaExecution.runResult.status === "SUCCESS") {
+    const completedAt = nowIso();
+    const finalization = await finalizeArchive({
+      layout,
+      manifest: finalManifest,
+      environment: buildEnvironmentSnapshotMetadata(layout, finalManifest),
+      finalSummary: buildFinalSummaryMetadata(layout, qaTaskPacket, finalManifest, executions, completedAt),
+    });
+    manifestForChecksums = finalization.manifest;
+    extraChecksumPaths.push(finalization.environment_path, finalization.final_summary_path);
+    await writeJobManifest(layout.manifestPath, manifestForChecksums);
+    await stateStore.recordArchiveFinalization(
+      qaTaskPacket,
+      qaExecution.runResult.run_id,
+      qaExecution.runResult.run_role,
+      finalization.final_summary_path,
+    );
+  }
+
+  const checksumRecords = await buildChecksumRecords(
+    layout,
+    planRecord,
+    freezeRecord,
+    approvalRecord,
+    executions,
+    extraChecksumPaths,
+  );
   await writeChecksumFile(layout.checksumsPath, checksumRecords);
 
   const freezeVerification = await verifyChecksumFile(layout.jobRoot, layout.freezeChecksumPath);
@@ -691,7 +761,7 @@ export async function runPhase1Local(repoRoot: string): Promise<Phase1RunSummary
     await failIntegrityCheck(
       layout,
       stateStore,
-      finalManifest,
+      manifestForChecksums,
       qaTaskPacket,
       formatChecksumVerificationFailure("freeze checksum verification failed", freezeVerification),
     );
@@ -702,7 +772,7 @@ export async function runPhase1Local(repoRoot: string): Promise<Phase1RunSummary
     await failIntegrityCheck(
       layout,
       stateStore,
-      finalManifest,
+      manifestForChecksums,
       qaTaskPacket,
       formatChecksumVerificationFailure("job checksum verification failed", checksumVerification),
     );

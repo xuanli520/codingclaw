@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ChecksumRecord } from "../../core/contracts/types.ts";
-import { readText, writeText } from "../../core/loop/support.ts";
+import { readText, uniqueStrings, writeText } from "../../core/loop/support.ts";
 
 export async function sha256File(path: string): Promise<string> {
   const buffer = await readFile(path);
@@ -76,6 +76,21 @@ export async function loadChecksumFile(path: string): Promise<ChecksumRecord[]> 
     throw new Error(parsed.format_errors.join("; "));
   }
   return parsed.records;
+}
+
+export async function createChecksumRecords(
+  root: string,
+  relativePaths: string[],
+): Promise<ChecksumRecord[]> {
+  const records: ChecksumRecord[] = [];
+  for (const relativePath of uniqueStrings(relativePaths)) {
+    records.push({
+      algorithm: "sha256",
+      path: relativePath,
+      hash: await sha256File(join(root, relativePath)),
+    });
+  }
+  return records;
 }
 
 export async function verifyChecksumRecords(
