@@ -63,5 +63,8 @@ export function nextRequiredActionFromState(state: JobState): string {
   if (state === "COMPLETED") {
     return "No further action is required.";
   }
+  if (state === "INTEGRITY_FAILED") {
+    return "Require owner review or regenerate integrity records before continuing.";
+  }
   return "Start the builder run for the approved story.";
 }

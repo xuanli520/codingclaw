@@ -66,6 +66,19 @@ export function detectBaseCommit(repoRoot: string): string {
   return new TextDecoder().decode(result.stdout).trim() || "UNKNOWN";
 }
 
+export function detectBaseBranch(repoRoot: string): string {
+  const result = Bun.spawnSync({
+    cmd: ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+    cwd: repoRoot,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  if (result.exitCode !== 0) {
+    return "UNKNOWN";
+  }
+  return new TextDecoder().decode(result.stdout).trim() || "UNKNOWN";
+}
+
 export async function materializeJsonTemplate<T>(
   templatePath: string,
   replacements: Record<string, unknown>,
