@@ -1,11 +1,13 @@
 import { dirname, join } from "node:path";
 import { buildArtifactIndex } from "../../ops/archive/artifact-index.ts";
+import { writeRunTimings, writeWorkerLog } from "../../ops/archive/run-metadata.ts";
 import { ensureDir, relativePosix, writeJson, writeText } from "../../core/loop/support.ts";
 import type {
   AdapterExecutionResult,
   RunEnvelope,
   RunResult,
   RunRole,
+  RunTimingMetadata,
   WorkerOutput,
 } from "../../core/contracts/types.ts";
 
@@ -85,6 +87,7 @@ function renderHandoff(
     ...(workerOutput.report_paths.length === 0 ? ["- none"] : workerOutput.report_paths.map((value) => `- ${value}`)),
     "- log paths:",
     "- logs/command-log.txt",
+    "- logs/worker.log",
     "- test result paths:",
     ...(workerOutput.test_result_paths.length === 0 ? ["- none"] : workerOutput.test_result_paths.map((value) => `- ${value}`)),
     "- trace references:",
@@ -112,7 +115,9 @@ export class GenericCliAdapter {
     const runRoot = envelope.artifact_path;
     const envelopePath = join(envelope.runtime_home, "envelopes", `${envelope.run_id}.json`);
     const commandLogPath = join(runRoot, "logs", "command-log.txt");
+    const workerLogPath = join(runRoot, "logs", "worker.log");
     const runResultPath = join(runRoot, "metadata", "run-result.json");
+    const timingsPath = join(runRoot, "metadata", "timings.json");
     const artifactIndexPath = join(runRoot, "metadata", "artifact-index.json");
     const handoffPath = join(runRoot, "reports", "handoff.en.md");
     const workerScript = workerScriptForRole(this.repoRoot, envelope.run_role);
@@ -147,7 +152,32 @@ export class GenericCliAdapter {
       workerOutput = fallbackWorkerOutput(stderr);
     }
 
+    const durationMs = Math.max(0, endedAtDate.getTime() - startedAtDate.getTime());
+    const runTimings: RunTimingMetadata = {
+      job_id: envelope.job_id,
+      run_id: envelope.run_id,
+      run_role: envelope.run_role,
+      story_id: envelope.story_id,
+      adapter_id: "generic-cli",
+      worker_exit_code: exitCode,
+      started_at: startedAtDate.toISOString(),
+      ended_at: endedAtDate.toISOString(),
+      duration_ms: durationMs,
+      duration_s: Math.max(0, Math.round(durationMs / 1000)),
+    };
+
     await writeText(commandLogPath, renderCommandLog(command, exitCode, stdout, stderr));
+    await writeWorkerLog(workerLogPath, {
+      job_id: envelope.job_id,
+      run_id: envelope.run_id,
+      run_role: envelope.run_role,
+      started_at: runTimings.started_at,
+      ended_at: runTimings.ended_at,
+      exit_code: exitCode,
+      stdout,
+      stderr,
+    });
+    await writeRunTimings(timingsPath, runTimings);
 
     const runResult: RunResult = {
       run_id: envelope.run_id,
@@ -156,9 +186,9 @@ export class GenericCliAdapter {
       status_family: "run_exit",
       status: workerOutput.status,
       artifact_root: relativePosix(this.repoRoot, runRoot),
-      started_at: startedAtDate.toISOString(),
-      ended_at: endedAtDate.toISOString(),
-      duration_s: Math.max(0, Math.round((endedAtDate.getTime() - startedAtDate.getTime()) / 1000)),
+      started_at: runTimings.started_at,
+      ended_at: runTimings.ended_at,
+      duration_s: runTimings.duration_s,
       adapter_id: "generic-cli",
     };
 

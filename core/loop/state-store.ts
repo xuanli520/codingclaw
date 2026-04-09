@@ -136,6 +136,19 @@ function integrityFailureDecisionEntry(runId: string, reason: string): string {
   ].join("\n");
 }
 
+function archiveFinalizationDecisionEntry(runId: string, finalSummaryPath: string): string {
+  return [
+    `## ${nowIso()}`,
+    "",
+    "- card_id: n/a",
+    `- run_id: ${runId}`,
+    `- decision summary: Archive finalization completed and wrote ${finalSummaryPath}.`,
+    "- resulting job state: COMPLETED",
+    "- next required action: No further action is required.",
+    "",
+  ].join("\n");
+}
+
 export interface StateStorePaths {
   archiveStateRoot?: string;
   liveStateRoot?: string;
@@ -464,6 +477,44 @@ export class StateStore {
       this.progressPath,
       "progress.en.md",
       renderProgress(taskPacket, "INTEGRITY_FAILED", taskPacket.run_id, taskPacket.run_role, reason),
+    );
+  }
+
+  async recordArchiveFinalization(
+    taskPacket: TaskPacket,
+    latestRunId: string,
+    latestRunRole: RunRole,
+    finalSummaryPath: string,
+  ): Promise<void> {
+    const storyQueue = await readJson<StoryQueueFile>(this.storyQueuePath);
+    storyQueue.freeze_version = taskPacket.freeze_version;
+    storyQueue.stories = storyQueue.stories.map((story) =>
+      story.story_id === taskPacket.story.story_id
+        ? {
+            ...story,
+            queue_state: "COMPLETED",
+            last_run_id: latestRunId,
+          }
+        : story,
+    );
+
+    const existingDecisions = await readText(this.decisionsPath);
+    await this.writeMirroredJson(this.storyQueuePath, "story-queue.json", storyQueue);
+    await this.writeMirroredText(
+      this.decisionsPath,
+      "decisions.en.md",
+      `${existingDecisions.trimEnd()}\n\n${archiveFinalizationDecisionEntry(latestRunId, finalSummaryPath)}`,
+    );
+    await this.writeMirroredText(
+      this.progressPath,
+      "progress.en.md",
+      renderProgress(
+        taskPacket,
+        "COMPLETED",
+        latestRunId,
+        latestRunRole,
+        "Archive finalization completed and the canonical local job bundle is closed.",
+      ),
     );
   }
 }

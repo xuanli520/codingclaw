@@ -9,9 +9,11 @@ async function main(): Promise<void> {
 
   const requiredBuilderArtifacts = [
     "metadata/task-packet.en.json",
+    "metadata/timings.json",
     "metadata/run-result.json",
     "metadata/artifact-index.json",
     "logs/command-log.txt",
+    "logs/worker.log",
     "reports/handoff.en.md",
     "reports/implementation-summary.en.md",
     "reports/self-check.en.md",

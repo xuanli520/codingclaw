@@ -135,6 +135,71 @@ export interface RunResult {
   adapter_id: string;
 }
 
+export interface FinalSummaryRunRecord {
+  run_id: string;
+  run_role: RunRole;
+  run_exit_status: RunExitStatus;
+  started_at: string;
+  ended_at: string;
+  duration_s: number;
+  handoff_path: string;
+  report_paths: string[];
+  log_paths: string[];
+  timing_path: string;
+}
+
+export interface FinalSummaryMetadata {
+  job_id: string;
+  completed_at: string;
+  final_job_state: JobState;
+  freeze_version: string;
+  story_id: string;
+  acceptance_ids: string[];
+  final_summary_path: string;
+  environment_path: string;
+  checksum_file: string;
+  latest_handoff_path: string;
+  runs: FinalSummaryRunRecord[];
+}
+
+export interface EnvironmentSnapshotMetadata {
+  job_id: string;
+  freeze_version: string;
+  captured_at: string;
+  base_branch: string;
+  base_commit: string;
+  approved_adapter_set: string[];
+  archive_roots: {
+    artifact_root: string;
+    state_root: string;
+    approvals_root: string;
+    runtime_home_root: string;
+  };
+  host: {
+    platform: string;
+    release: string;
+    arch: string;
+    hostname: string;
+  };
+  runtime: {
+    bun_version: string;
+    node_version: string;
+  };
+}
+
+export interface RunTimingMetadata {
+  job_id: string;
+  run_id: string;
+  run_role: RunRole;
+  story_id: string;
+  adapter_id: string;
+  worker_exit_code: number;
+  started_at: string;
+  ended_at: string;
+  duration_ms: number;
+  duration_s: number;
+}
+
 export interface ArtifactIndexEntry {
   path: string;
   category: string;
