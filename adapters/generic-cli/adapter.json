@@ -16,7 +16,7 @@
     "local-fixture"
   ],
   "supported_sandbox_model": [
-    "host-process"
+    "docker-container"
   ],
   "supported_artifact_outputs": [
     "run-result.json",

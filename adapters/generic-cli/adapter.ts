@@ -1,7 +1,7 @@
 import { dirname, join } from "node:path";
 import { buildArtifactIndex } from "../../ops/archive/artifact-index.ts";
 import { writeRunTimings, writeWorkerLog } from "../../ops/archive/run-metadata.ts";
-import { ensureDir, relativePosix, writeJson, writeText } from "../../core/loop/support.ts";
+import { relativePosix, toPosixPath, writeJson, writeText } from "../../core/loop/support.ts";
 import type {
   AdapterExecutionResult,
   RunEnvelope,
@@ -10,20 +10,21 @@ import type {
   RunTimingMetadata,
   WorkerOutput,
 } from "../../core/contracts/types.ts";
+import { DockerWorkerLauncher, materializeContainerizedRunEnvelope } from "./docker-runtime.ts";
 
-function workerScriptForRole(repoRoot: string, runRole: RunRole): string {
+function workerScriptForRole(rootPath: string, runRole: RunRole): string {
   if (runRole === "builder") {
-    return join(repoRoot, "ops", "workers", "builder.ts");
+    return toPosixPath(join(rootPath, "ops", "workers", "builder.ts"));
   }
   if (runRole === "qa") {
-    return join(repoRoot, "ops", "workers", "qa.ts");
+    return toPosixPath(join(rootPath, "ops", "workers", "qa.ts"));
   }
   throw new Error(`unsupported run role: ${runRole}`);
 }
 
-function fallbackWorkerOutput(errorText: string): WorkerOutput {
+function fallbackWorkerOutput(errorText: string, status: WorkerOutput["status"] = "FAILED_EXECUTION"): WorkerOutput {
   return {
-    status: "FAILED_EXECUTION",
+    status,
     completed: [],
     open: ["Inspect the worker stderr output."],
     blockers: errorText ? [errorText.trim()] : ["worker execution failed"],
@@ -109,36 +110,37 @@ function renderHandoff(
 }
 
 export class GenericCliAdapter {
-  constructor(private readonly repoRoot: string) {}
+  private readonly dockerLauncher: DockerWorkerLauncher;
+
+  constructor(private readonly repoRoot: string) {
+    this.dockerLauncher = new DockerWorkerLauncher(repoRoot);
+  }
 
   async execute(envelope: RunEnvelope): Promise<AdapterExecutionResult> {
     const runRoot = envelope.artifact_path;
-    const envelopePath = join(envelope.runtime_home, "envelopes", `${envelope.run_id}.json`);
     const commandLogPath = join(runRoot, "logs", "command-log.txt");
     const workerLogPath = join(runRoot, "logs", "worker.log");
     const runResultPath = join(runRoot, "metadata", "run-result.json");
     const timingsPath = join(runRoot, "metadata", "timings.json");
     const artifactIndexPath = join(runRoot, "metadata", "artifact-index.json");
     const handoffPath = join(runRoot, "reports", "handoff.en.md");
-    const workerScript = workerScriptForRole(this.repoRoot, envelope.run_role);
+    const materialization = await materializeContainerizedRunEnvelope(envelope);
+    const workerScript = workerScriptForRole(
+      materialization.runtime.container_paths.repo_path,
+      materialization.container_envelope.run_role,
+    );
 
-    await ensureDir(dirname(envelopePath));
-    await writeJson(envelopePath, envelope);
-
-    const command = [process.execPath, workerScript, envelopePath];
     const startedAtDate = new Date();
-    const processHandle = Bun.spawn({
-      cmd: command,
-      cwd: this.repoRoot,
-      stdout: "pipe",
-      stderr: "pipe",
+    const launchResult = await this.dockerLauncher.launch({
+      run_role: materialization.container_envelope.run_role,
+      image: materialization.runtime.image,
+      worker_script_path: workerScript,
+      envelope_path: materialization.runtime.envelope_container_path,
+      runtime: materialization.runtime,
     });
-
-    const stdoutPromise = new Response(processHandle.stdout).text();
-    const stderrPromise = new Response(processHandle.stderr).text();
-    const exitCode = await processHandle.exited;
-    const stdout = await stdoutPromise;
-    const stderr = await stderrPromise;
+    const exitCode = launchResult.exitCode;
+    const stdout = launchResult.stdout;
+    const stderr = launchResult.stderr;
     const endedAtDate = new Date();
 
     let workerOutput: WorkerOutput;
@@ -166,7 +168,7 @@ export class GenericCliAdapter {
       duration_s: Math.max(0, Math.round(durationMs / 1000)),
     };
 
-    await writeText(commandLogPath, renderCommandLog(command, exitCode, stdout, stderr));
+    await writeText(commandLogPath, renderCommandLog(launchResult.command, exitCode, stdout, stderr));
     await writeWorkerLog(workerLogPath, {
       job_id: envelope.job_id,
       run_id: envelope.run_id,

@@ -82,6 +82,36 @@ export interface TaskPacket {
   story: StoryContract;
 }
 
+export type ContainerMountName = "repo" | "state" | "artifacts" | "runtime-home";
+
+export interface ContainerPathMount {
+  name: ContainerMountName;
+  host_path: string;
+  container_path: string;
+  read_only: boolean;
+}
+
+export interface ContainerPathMap {
+  repo_path: string;
+  state_path: string;
+  artifact_path: string;
+  runtime_home: string;
+  task_packet_path: string;
+  previous_handoff_path: string;
+  approval_snapshot_path: string;
+  trace_context: Record<string, unknown>;
+}
+
+export interface ContainerRuntimeConfig {
+  runtime: "docker";
+  image: string;
+  workdir: string;
+  envelope_host_path: string;
+  envelope_container_path: string;
+  mounts: ContainerPathMount[];
+  container_paths: ContainerPathMap;
+}
+
 export interface RunEnvelope {
   job_id: string;
   freeze_id: string;
@@ -106,6 +136,7 @@ export interface RunEnvelope {
   approval_snapshot_path: string;
   trace_context: Record<string, unknown>;
   requested_capabilities: string[];
+  container_runtime?: ContainerRuntimeConfig | null;
 }
 
 export interface WorkerOutput {

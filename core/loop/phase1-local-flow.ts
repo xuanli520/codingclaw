@@ -206,7 +206,7 @@ async function buildRunEnvelope(
   approvalSnapshotPath: string,
   traceContext: Record<string, unknown>,
 ): Promise<RunEnvelope> {
-  return materializeJsonTemplate<RunEnvelope>(
+  const envelope = await materializeJsonTemplate<RunEnvelope>(
     join(repoRoot, "control", "fixtures", "phase1-local-run-envelope.json"),
     {
       __RUN_ID__: taskPacket.run_id,
@@ -224,6 +224,12 @@ async function buildRunEnvelope(
       __TRACE_CONTEXT__: traceContext,
     },
   );
+
+  return {
+    ...envelope,
+    requested_capabilities: uniqueStrings([...envelope.requested_capabilities, "container_control"]),
+    container_runtime: null,
+  };
 }
 
 async function normalizeRunArtifacts(
