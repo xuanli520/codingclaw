@@ -1,7 +1,7 @@
 import { dirname, join } from "node:path";
 import { buildArtifactIndex } from "../../ops/archive/artifact-index.ts";
 import { writeRunTimings, writeWorkerLog } from "../../ops/archive/run-metadata.ts";
-import { relativePosix, toPosixPath, writeJson, writeText } from "../../core/loop/support.ts";
+import { ensureDir, relativePosix, toPosixPath, writeJson, writeText } from "../../core/loop/support.ts";
 import type {
   AdapterExecutionResult,
   RunEnvelope,
@@ -62,6 +62,13 @@ function unexpectedLaunchResult(error: unknown): DockerWorkerLaunchResult {
     stderr: formatErrorText(error),
     failure_status: "FAILED_INFRA",
   };
+}
+
+async function ensureHostWritableRunLayout(runRoot: string): Promise<void> {
+  await ensureDir(join(runRoot, "logs"));
+  await ensureDir(join(runRoot, "reports"));
+  await ensureDir(join(runRoot, "metadata"));
+  await ensureDir(join(runRoot, "evidence", "test-results"));
 }
 
 function renderCommandLog(command: string[], exitCode: number, stdout: string, stderr: string): string {
@@ -150,6 +157,7 @@ export class GenericCliAdapter {
     const timingsPath = join(runRoot, "metadata", "timings.json");
     const artifactIndexPath = join(runRoot, "metadata", "artifact-index.json");
     const handoffPath = join(runRoot, "reports", "handoff.en.md");
+    await ensureHostWritableRunLayout(runRoot);
     const materialization = await materializeContainerizedRunEnvelope(envelope);
     const workerScript = workerScriptForRole(
       materialization.runtime.container_paths.repo_path,
