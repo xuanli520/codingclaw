@@ -1,0 +1,9 @@
+{
+  "adapter_id": "generic-cli",
+  "profile_id": "single-node-local",
+  "default_timeout_seconds": 300,
+  "retry_limit": 0,
+  "log_redaction": "no-secrets-in-fixture",
+  "scope_policy": "single-approved-story-only",
+  "failure_policy": "return-standard-run-exit-status"
+}

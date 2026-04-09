@@ -1,0 +1,98 @@
+{
+  "adapter_id": "generic-cli",
+  "profile_id": "single-node-local",
+  "capabilities": {
+    "filesystem_read": {
+      "mode": "allow",
+      "scope": [
+        "repo",
+        "state",
+        "artifacts",
+        "runtime-home"
+      ],
+      "cost_level": "low",
+      "risk_level": "medium",
+      "approval_requirement": "none"
+    },
+    "filesystem_write": {
+      "mode": "allow",
+      "scope": [
+        "state",
+        "artifacts",
+        "runtime-home"
+      ],
+      "cost_level": "low",
+      "risk_level": "medium",
+      "approval_requirement": "none"
+    },
+    "shell_command": {
+      "mode": "allow",
+      "scope": [
+        "local-worker-command"
+      ],
+      "cost_level": "low",
+      "risk_level": "medium",
+      "approval_requirement": "none"
+    },
+    "git": {
+      "mode": "allow",
+      "scope": [
+        "read-only-head-commit"
+      ],
+      "cost_level": "low",
+      "risk_level": "low",
+      "approval_requirement": "none"
+    },
+    "network": {
+      "mode": "deny",
+      "scope": [],
+      "cost_level": "none",
+      "risk_level": "low",
+      "approval_requirement": "not-supported"
+    },
+    "browser": {
+      "mode": "deny",
+      "scope": [],
+      "cost_level": "none",
+      "risk_level": "low",
+      "approval_requirement": "not-supported"
+    },
+    "container_control": {
+      "mode": "deny",
+      "scope": [],
+      "cost_level": "none",
+      "risk_level": "low",
+      "approval_requirement": "not-supported"
+    },
+    "screenshot": {
+      "mode": "deny",
+      "scope": [],
+      "cost_level": "none",
+      "risk_level": "low",
+      "approval_requirement": "not-supported"
+    },
+    "secret_injection": {
+      "mode": "deny",
+      "scope": [],
+      "cost_level": "none",
+      "risk_level": "medium",
+      "approval_requirement": "not-supported"
+    },
+    "interactive_approval": {
+      "mode": "allow",
+      "scope": [
+        "local-fixture-only"
+      ],
+      "cost_level": "low",
+      "risk_level": "low",
+      "approval_requirement": "none"
+    },
+    "session_export": {
+      "mode": "deny",
+      "scope": [],
+      "cost_level": "none",
+      "risk_level": "low",
+      "approval_requirement": "not-supported"
+    }
+  }
+}

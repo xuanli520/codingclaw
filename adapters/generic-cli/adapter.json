@@ -1,0 +1,30 @@
+{
+  "adapter_id": "generic-cli",
+  "executor_family": "local-cli",
+  "adapter_version": "0.1.0",
+  "supported_run_roles": [
+    "builder",
+    "qa"
+  ],
+  "supported_run_modes": [
+    "single-node-local"
+  ],
+  "supported_approval_hooks": [
+    "interrupt-and-resume"
+  ],
+  "supported_credential_model": [
+    "local-fixture"
+  ],
+  "supported_sandbox_model": [
+    "host-process"
+  ],
+  "supported_artifact_outputs": [
+    "run-result.json",
+    "artifact-index.json",
+    "command-log.txt",
+    "handoff.en.md"
+  ],
+  "supported_trace_schema": [
+    "state/trace-index.json"
+  ]
+}

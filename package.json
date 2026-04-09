@@ -1,0 +1,12 @@
+{
+  "name": "codingclaw-phase1",
+  "private": true,
+  "type": "module",
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/node": "latest"
+  },
+  "scripts": {
+    "phase1": "bun run control/commander/phase1-local.ts"
+  }
+}

@@ -19,6 +19,7 @@ site/
 .eggs/
 *.egg-info/
 pip-wheel-metadata/
+node_modules/
 
 # Control-plane live state
 /state/store/
