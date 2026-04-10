@@ -48,6 +48,7 @@ export interface ContainerizedRunEnvelopeMaterialization {
   runtime: ContainerRuntimeConfig;
   host_envelope_path: string;
   container_envelope_path: string;
+  host_task_packet_path: string;
 }
 
 export interface DockerWorkerLaunchRequest {
@@ -288,6 +289,7 @@ export async function materializeContainerizedRunEnvelope(
     runtime,
     host_envelope_path: hostEnvelopePath,
     container_envelope_path: containerEnvelopePath,
+    host_task_packet_path: hostContainerTaskPacketPath,
   };
 }
 

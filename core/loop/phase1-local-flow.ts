@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import { GenericCliAdapter } from "../../adapters/generic-cli/adapter.ts";
+import { containerizeTaskPacket } from "../../adapters/generic-cli/docker-runtime.ts";
 import { writeApprovalArchive } from "../../ops/archive/approvals.ts";
 import {
   buildEnvironmentSnapshotMetadata,
@@ -37,11 +38,13 @@ import type {
   ContractFreezeMetadata,
   JobManifest,
   JobManifestApprovalRecord,
+  JobManifestPauseContext,
   JobManifestRunRecord,
   JobManifestStoryRecord,
   JobState,
   RunResult,
   RunEnvelope,
+  RunExitStatus,
   RunRole,
   TaskPacket,
 } from "../contracts/types.ts";
@@ -156,6 +159,7 @@ async function assertFreshJobRoot(layout: ReturnType<typeof resolveJobRootLayout
 
 async function buildTaskPacket(
   repoRoot: string,
+  baseCommit: string,
   runRole: RunRole,
   runId: string,
   stateRoot: string,
@@ -166,7 +170,6 @@ async function buildTaskPacket(
 ): Promise<TaskPacket> {
   const taskPacketPath = join(artifactRoot, "metadata", "task-packet.en.json");
   const { expectedArtifacts, verificationTargets } = roleArtifacts(runRole);
-  const baseCommit = detectBaseCommit(repoRoot);
 
   const packetWithoutChecksum = await materializeJsonTemplate<TaskPacket>(
     join(repoRoot, "control", "fixtures", "phase1-local-task-packet.en.json"),
@@ -200,6 +203,10 @@ async function buildTaskPacket(
 
 function taskPacketDigest(taskPacket: TaskPacket): string {
   return sha256Text(`${JSON.stringify({ ...taskPacket, task_packet_sha256: "" }, null, 2)}\n`);
+}
+
+function executionTaskPacket(taskPacket: TaskPacket): TaskPacket {
+  return containerizeTaskPacket(taskPacket, taskPacket);
 }
 
 async function buildRunEnvelope(
@@ -330,6 +337,20 @@ function buildFreezeMetadata(
   };
 }
 
+function approvalRelativePaths(
+  layout: ReturnType<typeof resolveJobRootLayout>,
+  approvalRecord: Awaited<ReturnType<typeof writeApprovalArchive>>,
+): string[] {
+  const relativePaths = [
+    layout.relativeToJobRoot(approvalRecord.snapshot_path),
+    layout.relativeToJobRoot(approvalRecord.summary_path),
+  ];
+  if (approvalRecord.decision_path !== null) {
+    relativePaths.push(layout.relativeToJobRoot(approvalRecord.decision_path));
+  }
+  return uniqueStrings(relativePaths);
+}
+
 function buildManifestApprovalRecord(
   layout: ReturnType<typeof resolveJobRootLayout>,
   approvalRecord: Awaited<ReturnType<typeof writeApprovalArchive>>,
@@ -341,7 +362,8 @@ function buildManifestApprovalRecord(
     requested_action: approvalRecord.requested_action,
     decision: approvalRecord.decision,
     snapshot_path: layout.relativeToJobRoot(approvalRecord.snapshot_path),
-    decision_path: layout.relativeToJobRoot(approvalRecord.decision_path),
+    decision_path:
+      approvalRecord.decision_path === null ? null : layout.relativeToJobRoot(approvalRecord.decision_path),
     summary_zh_ref: layout.relativeToJobRoot(approvalRecord.summary_path),
     decided_at: approvalRecord.decided_at,
   };
@@ -399,6 +421,111 @@ function buildManifestStoryRecord(
   };
 }
 
+function emptyPauseContext(): JobManifestPauseContext {
+  return {
+    is_paused: false,
+    pause_reason: null,
+    waiting_on: null,
+    resume_action: null,
+    paused_at: null,
+    related_card_id: null,
+    expires_at: null,
+  };
+}
+
+function waitingOnForState(state: JobState): string | null {
+  if (state === "AWAITING_OWNER") {
+    return "owner";
+  }
+  if (state === "AWAITING_TAKEOVER") {
+    return "takeover";
+  }
+  return null;
+}
+
+function latestEvidencePath(execution: AdapterExecutionResult): string {
+  const relativePath = execution.workerOutput.evidence_paths[0] ?? "reports/handoff.en.md";
+  return `artifacts/runs/${execution.runResult.run_id}/${relativePath}`;
+}
+
+function recoveryRiskLevel(status: RunExitStatus): string {
+  if (
+    status === "FAILED_POLICY" ||
+    status === "FAILED_EXECUTION" ||
+    status === "FAILED_INFRA" ||
+    status === "TIMEOUT" ||
+    status === "BUDGET_EXCEEDED"
+  ) {
+    return "high";
+  }
+  return "medium";
+}
+
+function buildRecoveryCard(taskPacket: TaskPacket, execution: AdapterExecutionResult): ApprovalCardSnapshot {
+  const jobState = mapRunExitToJobState(execution.runResult.status, execution.runResult.run_role);
+  const resumeGate = jobState === "AWAITING_TAKEOVER" ? "takeover" : "owner";
+  const latestEvidenceRef = latestEvidencePath(execution);
+  const timeoutAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+  return {
+    job_id: taskPacket.job_id,
+    card_id: `card-recovery-${execution.runResult.run_id}`,
+    card_state: "PENDING",
+    card_type: "recovery",
+    story_id: taskPacket.story.story_id,
+    freeze_version: taskPacket.freeze_version,
+    risk_level: recoveryRiskLevel(execution.runResult.status),
+    summary_zh: `运行 ${execution.runResult.run_id} 已以 ${execution.runResult.status} 停止，当前故事需要${resumeGate === "takeover" ? "接管" : "人工决策"}后继续。`,
+    requested_action:
+      resumeGate === "takeover"
+        ? "Review the blocked run and trigger takeover before continuing."
+        : "Review the blocked run and decide how to resume the job.",
+    candidate_actions:
+      resumeGate === "takeover"
+        ? ["trigger takeover", "resume job", "request revision"]
+        : ["resume job", "request revision", "trigger takeover"],
+    timeout_at: timeoutAt,
+    created_at: execution.runResult.ended_at,
+    evidence_refs: uniqueStrings([
+      latestEvidenceRef,
+      `artifacts/runs/${execution.runResult.run_id}/metadata/run-result.json`,
+      `artifacts/runs/${execution.runResult.run_id}/reports/handoff.en.md`,
+    ]),
+    recovery_context: {
+      last_exit_reason: execution.runResult.status,
+      current_freeze_version: taskPacket.freeze_version,
+      current_story: taskPacket.story.story_id,
+      latest_evidence_path: latestEvidenceRef,
+      recommended_next_action: execution.workerOutput.next_action,
+      resume_gate: resumeGate,
+      paused_run_id: execution.runResult.run_id,
+      paused_run_role: execution.runResult.run_role,
+    },
+  };
+}
+
+function buildPauseContext(
+  execution: AdapterExecutionResult | null,
+  approvalRecord: Awaited<ReturnType<typeof writeApprovalArchive>> | null,
+): JobManifestPauseContext {
+  if (execution === null) {
+    return emptyPauseContext();
+  }
+  const jobState = mapRunExitToJobState(execution.runResult.status, execution.runResult.run_role);
+  const waitingOn = waitingOnForState(jobState);
+  if (waitingOn === null) {
+    return emptyPauseContext();
+  }
+  return {
+    is_paused: true,
+    pause_reason: execution.runResult.status,
+    waiting_on: waitingOn,
+    resume_action: execution.workerOutput.next_action,
+    paused_at: execution.runResult.ended_at,
+    related_card_id: approvalRecord?.card_id ?? null,
+    expires_at: approvalRecord?.timeout_at ?? null,
+  };
+}
+
 function buildJobManifest(
   layout: ReturnType<typeof resolveJobRootLayout>,
   taskPacket: TaskPacket,
@@ -406,13 +533,16 @@ function buildJobManifest(
   planRecord: Awaited<ReturnType<typeof writeDevelopmentPlan>>,
   freezeRecord: Awaited<ReturnType<typeof writeContractFreeze>>,
   approvalRecord: Awaited<ReturnType<typeof writeApprovalArchive>>,
+  approvalRecords: Array<Awaited<ReturnType<typeof writeApprovalArchive>>>,
   executions: AdapterExecutionResult[],
   adapterId: string,
 ): JobManifest {
   const runs = buildManifestRunRecords(layout, executions);
   const storyRecord = buildManifestStoryRecord(taskPacket, executions);
   const latestRunId = runs.length > 0 ? runs[runs.length - 1].run_id : "";
-  const createdAt = approvalRecord.decided_at;
+  const latestExecution = executions.length > 0 ? executions[executions.length - 1] : null;
+  const latestApprovalRecord = approvalRecords.length > 0 ? approvalRecords[approvalRecords.length - 1] : null;
+  const createdAt = approvalRecord.decided_at ?? nowIso();
   const updatedAt = executions.length > 0 ? executions[executions.length - 1].runResult.ended_at : nowIso();
   const status = storyRecord.queue_state;
 
@@ -429,15 +559,7 @@ function buildJobManifest(
     active_story_id: taskPacket.story.story_id,
     current_run_id: latestRunId,
     approved_adapter_set: [adapterId],
-    pause_context: {
-      is_paused: false,
-      pause_reason: null,
-      waiting_on: null,
-      resume_action: null,
-      paused_at: null,
-      related_card_id: null,
-      expires_at: null,
-    },
+    pause_context: buildPauseContext(latestExecution, latestApprovalRecord),
     language_policy: taskPacket.language_policy,
     budget_limits: taskPacket.budget_limits,
     time_limits: taskPacket.time_limits,
@@ -452,7 +574,7 @@ function buildJobManifest(
       approval_card_id: approvalRecord.card_id,
       summary_zh_ref: layout.relativeToJobRoot(approvalRecord.summary_path),
       approval_state: approvalRecord.card_state,
-      approved_at: approvalRecord.decided_at,
+      approved_at: approvalRecord.decided_at ?? createdAt,
     },
     freeze: {
       freeze_id: taskPacket.freeze_id,
@@ -462,11 +584,11 @@ function buildJobManifest(
       checksum_path: layout.relativeToJobRoot(freezeRecord.checksum_path),
       hash: freezeRecord.hash,
       approval_card_id: approvalRecord.card_id,
-      approved_at: approvalRecord.decided_at,
+      approved_at: approvalRecord.decided_at ?? createdAt,
     },
     stories: [storyRecord],
     runs,
-    approvals: [buildManifestApprovalRecord(layout, approvalRecord)],
+    approvals: approvalRecords.map((record) => buildManifestApprovalRecord(layout, record)),
     artifacts: {
       runs_root: "artifacts/runs",
       sessions_root: "artifacts/sessions",
@@ -476,9 +598,7 @@ function buildJobManifest(
         layout.relativeToJobRoot(freezeRecord.path),
         layout.relativeToJobRoot(freezeRecord.json_path),
         layout.relativeToJobRoot(freezeRecord.checksum_path),
-        layout.relativeToJobRoot(approvalRecord.snapshot_path),
-        layout.relativeToJobRoot(approvalRecord.decision_path),
-        layout.relativeToJobRoot(approvalRecord.summary_path),
+        ...approvalRecords.flatMap((record) => approvalRelativePaths(layout, record)),
         "job-manifest.json",
         "checksums.txt",
       ]),
@@ -525,7 +645,7 @@ async function buildChecksumRecords(
   layout: ReturnType<typeof resolveJobRootLayout>,
   planRecord: Awaited<ReturnType<typeof writeDevelopmentPlan>>,
   freezeRecord: Awaited<ReturnType<typeof writeContractFreeze>>,
-  approvalRecord: Awaited<ReturnType<typeof writeApprovalArchive>>,
+  approvalRecords: Array<Awaited<ReturnType<typeof writeApprovalArchive>>>,
   executions: AdapterExecutionResult[],
   extraRelativePaths: string[] = [],
 ): Promise<ChecksumRecord[]> {
@@ -536,6 +656,10 @@ async function buildChecksumRecords(
     for (const file of files) {
       runRelativePaths.push(`${runRootRelative}/${file}`);
     }
+    const taskPacketPath = layout.relativeToJobRoot(execution.taskPacketPath);
+    if (!taskPacketPath.startsWith(`${runRootRelative}/`)) {
+      runRelativePaths.push(taskPacketPath);
+    }
   }
 
   const relativePaths = uniqueStrings([
@@ -543,9 +667,7 @@ async function buildChecksumRecords(
     layout.relativeToJobRoot(freezeRecord.path),
     layout.relativeToJobRoot(freezeRecord.json_path),
     layout.relativeToJobRoot(freezeRecord.checksum_path),
-    layout.relativeToJobRoot(approvalRecord.snapshot_path),
-    layout.relativeToJobRoot(approvalRecord.decision_path),
-    layout.relativeToJobRoot(approvalRecord.summary_path),
+    ...approvalRecords.flatMap((record) => approvalRelativePaths(layout, record)),
     "job-manifest.json",
     ...runRelativePaths,
     ...extraRelativePaths,
@@ -586,6 +708,7 @@ export async function runPhase1Local(repoRoot: string): Promise<Phase1RunSummary
 
   const builderTaskPacket = await buildTaskPacket(
     repoRoot,
+    baseCommit,
     "builder",
     builderRunId,
     layout.archiveStateRoot,
@@ -595,6 +718,7 @@ export async function runPhase1Local(repoRoot: string): Promise<Phase1RunSummary
   );
   const qaTaskPacketPreview = await buildTaskPacket(
     repoRoot,
+    baseCommit,
     "qa",
     qaRunId,
     layout.archiveStateRoot,
@@ -605,6 +729,10 @@ export async function runPhase1Local(repoRoot: string): Promise<Phase1RunSummary
   );
 
   const approvalRecord = await writeApprovalArchive(layout.approvalRoot(approvalCard.card_id), approvalCard, decision);
+  if (approvalRecord.decision_path === null || approvalRecord.decided_at === null) {
+    throw new Error("phase1 fixture approval must be decided before freeze generation");
+  }
+  const approvalRecords: Array<Awaited<ReturnType<typeof writeApprovalArchive>>> = [approvalRecord];
   const allExpectedArtifacts = uniqueStrings([
     ...builderTaskPacket.story.expected_artifacts,
     ...qaTaskPacketPreview.story.expected_artifacts,
@@ -654,8 +782,8 @@ export async function runPhase1Local(repoRoot: string): Promise<Phase1RunSummary
       baseBranch,
       dependencySnapshotDigest,
       adapterInfo,
-      builderTaskPacket,
-      qaTaskPacketPreview,
+      executionTaskPacket(builderTaskPacket),
+      executionTaskPacket(qaTaskPacketPreview),
       decision.decided_at,
     ),
     approvalSnapshotPath: layout.relativeToJobRoot(approvalRecord.snapshot_path),
@@ -709,19 +837,36 @@ export async function runPhase1Local(repoRoot: string): Promise<Phase1RunSummary
     planRecord,
     freezeRecord,
     approvalRecord,
+    approvalRecords,
     executions,
     adapterInfo.adapter_id,
   );
-  await writeJobManifest(layout.manifestPath, builderManifest);
+  if (builderManifest.status === "AWAITING_OWNER" || builderManifest.status === "AWAITING_TAKEOVER") {
+    const recoveryCard = buildRecoveryCard(builderTaskPacket, builderExecution);
+    approvalRecords.push(await writeApprovalArchive(layout.approvalRoot(recoveryCard.card_id), recoveryCard, null));
+  }
+  const builderManifestWithRecovery = buildJobManifest(
+    layout,
+    builderTaskPacket,
+    baseBranch,
+    planRecord,
+    freezeRecord,
+    approvalRecord,
+    approvalRecords,
+    executions,
+    adapterInfo.adapter_id,
+  );
+  await writeJobManifest(layout.manifestPath, builderManifestWithRecovery);
 
   let qaTaskPacket: TaskPacket | null = null;
   let qaExecution: AdapterExecutionResult | null = null;
-  let manifestForChecksums = builderManifest;
+  let manifestForChecksums = builderManifestWithRecovery;
   let latestTaskPacketForIntegrity = builderTaskPacket;
   const extraChecksumPaths: string[] = [];
   if (builderExecution.runResult.status === "SUCCESS") {
     qaTaskPacket = await buildTaskPacket(
       repoRoot,
+      baseCommit,
       "qa",
       qaRunId,
       layout.archiveStateRoot,
@@ -757,19 +902,35 @@ export async function runPhase1Local(repoRoot: string): Promise<Phase1RunSummary
       planRecord,
       freezeRecord,
       approvalRecord,
+      approvalRecords,
       executions,
       adapterInfo.adapter_id,
     );
-    manifestForChecksums = finalManifest;
-    await writeJobManifest(layout.manifestPath, finalManifest);
+    if (finalManifest.status === "AWAITING_OWNER" || finalManifest.status === "AWAITING_TAKEOVER") {
+      const recoveryCard = buildRecoveryCard(qaTaskPacket, qaExecution);
+      approvalRecords.push(await writeApprovalArchive(layout.approvalRoot(recoveryCard.card_id), recoveryCard, null));
+    }
+    const finalManifestWithRecovery = buildJobManifest(
+      layout,
+      qaTaskPacket,
+      baseBranch,
+      planRecord,
+      freezeRecord,
+      approvalRecord,
+      approvalRecords,
+      executions,
+      adapterInfo.adapter_id,
+    );
+    manifestForChecksums = finalManifestWithRecovery;
+    await writeJobManifest(layout.manifestPath, finalManifestWithRecovery);
 
     if (qaExecution.runResult.status === "SUCCESS") {
       const completedAt = nowIso();
       const finalization = await finalizeArchive({
         layout,
-        manifest: finalManifest,
-        environment: buildEnvironmentSnapshotMetadata(layout, finalManifest),
-        finalSummary: buildFinalSummaryMetadata(layout, qaTaskPacket, finalManifest, executions, completedAt),
+        manifest: finalManifestWithRecovery,
+        environment: buildEnvironmentSnapshotMetadata(layout, finalManifestWithRecovery),
+        finalSummary: buildFinalSummaryMetadata(layout, qaTaskPacket, finalManifestWithRecovery, executions, completedAt),
       });
       manifestForChecksums = finalization.manifest;
       extraChecksumPaths.push(finalization.environment_path, finalization.final_summary_path);
@@ -787,7 +948,7 @@ export async function runPhase1Local(repoRoot: string): Promise<Phase1RunSummary
     layout,
     planRecord,
     freezeRecord,
-    approvalRecord,
+    approvalRecords,
     executions,
     extraChecksumPaths,
   );

@@ -57,6 +57,21 @@ def dependency_snapshot_digest(repo_root: Path) -> str:
     return hashlib.sha256("\n".join(inputs).encode("utf-8")).hexdigest()
 
 
+def init_git_repo(repo_root: Path) -> str:
+    subprocess.run(["git", "init", "-b", "main"], cwd=repo_root, capture_output=True, text=True, check=True)
+    subprocess.run(["git", "config", "user.email", "tests@example.com"], cwd=repo_root, capture_output=True, text=True, check=True)
+    subprocess.run(["git", "config", "user.name", "Tests"], cwd=repo_root, capture_output=True, text=True, check=True)
+    subprocess.run(["git", "add", "."], cwd=repo_root, capture_output=True, text=True, check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=repo_root, capture_output=True, text=True, check=True)
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+
 def write_fake_docker(tmp_path: Path) -> Path:
     script_path = tmp_path / "fake-docker.py"
     script_path.write_text(
@@ -65,6 +80,7 @@ def write_fake_docker(tmp_path: Path) -> Path:
             #!/usr/bin/env python3
             import json
             import os
+            import subprocess
             import sys
             import time
             from pathlib import Path
@@ -135,6 +151,15 @@ def write_fake_docker(tmp_path: Path) -> Path:
             def task_packet_for(envelope: dict, mounts: list[dict[str, str]]) -> dict:
                 task_packet_path = map_path(envelope["task_packet_path"], mounts)
                 return load_json(task_packet_path)
+
+
+            def mutate_head(repo_path: str) -> None:
+                subprocess.run(["git", "config", "user.email", "tests@example.com"], cwd=repo_path, capture_output=True, text=True, check=True)
+                subprocess.run(["git", "config", "user.name", "Tests"], cwd=repo_path, capture_output=True, text=True, check=True)
+                marker = Path(repo_path) / ".phase1-head-shift"
+                marker.write_text("shift\\n", encoding="utf-8")
+                subprocess.run(["git", "add", ".phase1-head-shift"], cwd=repo_path, capture_output=True, text=True, check=True)
+                subprocess.run(["git", "commit", "-m", "builder-shift"], cwd=repo_path, capture_output=True, text=True, check=True)
 
 
             def create_builder_outputs(envelope: dict, task_packet: dict, artifact_root: Path) -> dict:
@@ -282,6 +307,8 @@ def write_fake_docker(tmp_path: Path) -> Path:
 
                 if envelope["run_role"] == "builder":
                     output = create_builder_outputs(envelope, task_packet, artifact_root)
+                    if mode == "builder_head_shift":
+                        mutate_head(map_path(envelope["repo_path"], mounts))
                 else:
                     if mode == "qa_failed_infra":
                         sys.stderr.write("docker: qa container failed before worker start\\n")
@@ -334,6 +361,34 @@ def assert_builder_failure_bundle(job_root: Path) -> None:
     ]:
         assert (builder_run_root / relative_path).exists()
         assert relative_path in indexed_paths
+
+
+def assert_recovery_pause_context(manifest: dict, job_root: Path, expected_status: str) -> None:
+    pause_context = manifest["pause_context"]
+    assert pause_context["is_paused"] is True
+    assert pause_context["pause_reason"] == expected_status
+    assert pause_context["waiting_on"] == "owner"
+    assert pause_context["resume_action"]
+    assert pause_context["paused_at"]
+    assert pause_context["related_card_id"]
+    assert pause_context["expires_at"]
+
+    recovery_record = manifest["approvals"][-1]
+    assert recovery_record["card_id"] == pause_context["related_card_id"]
+    assert recovery_record["card_type"] == "recovery"
+    assert recovery_record["card_state"] == "PENDING"
+    assert recovery_record["decision"] is None
+    assert recovery_record["decision_path"] is None
+
+    recovery_root = job_root / "approvals" / recovery_record["card_id"]
+    recovery_card = json.loads((recovery_root / "approval-card.json").read_text(encoding="utf-8"))
+
+    assert (recovery_root / "summary.zh.md").exists()
+    assert not (recovery_root / "decision.json").exists()
+    assert recovery_card["recovery_context"]["last_exit_reason"] == expected_status
+    assert recovery_card["recovery_context"]["latest_evidence_path"]
+    assert recovery_card["recovery_context"]["recommended_next_action"]
+    assert recovery_card["recovery_context"]["resume_gate"] == "owner"
 
 
 @pytest.mark.integration
@@ -414,6 +469,56 @@ def test_phase1_local_builder_container_materialization_uses_read_only_inputs_an
     assert mounts["/work/runtime-home"].get("readonly") != "true"
     assert filesystem_write_scope == {"repo", "run-artifacts", "runtime-home"}
 
+    job_root = repo_root / "jobs" / "job-phase1-local"
+    manifest = json.loads((job_root / "job-manifest.json").read_text(encoding="utf-8"))
+    freeze = json.loads((job_root / "contract-freeze.json").read_text(encoding="utf-8"))
+    builder_run = next(run for run in manifest["runs"] if run["run_role"] == "builder")
+    expected_task_packet_path = builder_run["task_packet_path"]
+
+    assert expected_task_packet_path.endswith(f"/envelopes/container/task-packets/{builder_envelope['run_id']}.json")
+    assert builder_run["task_packet_path"] != f"artifacts/runs/{builder_envelope['run_id']}/metadata/task-packet.en.json"
+    assert json.loads((job_root / expected_task_packet_path).read_text(encoding="utf-8")) == builder_task_packet
+    assert expected_task_packet_path in (job_root / "checksums.txt").read_text(encoding="utf-8")
+    assert freeze["task_packet_digests"][builder_envelope["run_id"]] == builder_task_packet["task_packet_sha256"]
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(shutil.which("bun") is None, reason="bun is required")
+def test_phase1_local_qa_packet_keeps_freeze_base_commit_when_builder_moves_head(tmp_path):
+    repo_root = export_repo(tmp_path)
+    initial_commit = init_git_repo(repo_root)
+    fake_docker = write_fake_docker(tmp_path)
+    capture_dir = tmp_path / "captures"
+    result = run_phase1(
+        repo_root,
+        {
+            "CODINGCLAW_DOCKER_BIN": str(fake_docker),
+            "CODINGCLAW_FAKE_DOCKER_MODE": "builder_head_shift",
+            "CODINGCLAW_FAKE_DOCKER_CAPTURE_DIR": str(capture_dir),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
+
+    current_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    job_root = repo_root / "jobs" / "job-phase1-local"
+    freeze = json.loads((job_root / "contract-freeze.json").read_text(encoding="utf-8"))
+    manifest = json.loads((job_root / "job-manifest.json").read_text(encoding="utf-8"))
+    qa_capture = load_capture(capture_dir, "qa")
+
+    assert current_head != initial_commit
+    assert freeze["base_commit"] == initial_commit
+    assert manifest["base_commit"] == initial_commit
+    assert qa_capture["task_packet"]["base_commit"] == initial_commit
+    assert qa_capture["task_packet"]["base_commit"] != current_head
+    assert freeze["task_packet_digests"][qa_capture["task_packet"]["run_id"]] == qa_capture["task_packet"]["task_packet_sha256"]
+
 
 @pytest.mark.integration
 @pytest.mark.skipif(shutil.which("bun") is None, reason="bun is required")
@@ -438,6 +543,7 @@ def test_phase1_local_builder_failed_infra_stops_before_qa(tmp_path):
     assert live_trace == archived_trace
     assert not (job_root / "artifacts" / "final" / "final-summary.en.md").exists()
     assert_builder_failure_bundle(job_root)
+    assert_recovery_pause_context(manifest, job_root, "FAILED_INFRA")
 
 
 @pytest.mark.integration
@@ -536,6 +642,7 @@ def test_phase1_local_qa_non_success_writes_required_qa_bundle(tmp_path, mode, e
 
     qa_verdict = json.loads((qa_run_root / "metadata" / "qa-verdict.json").read_text(encoding="utf-8"))
     assert qa_verdict["status"] == expected_status
+    assert_recovery_pause_context(manifest, job_root, expected_status)
 
 
 @pytest.mark.integration

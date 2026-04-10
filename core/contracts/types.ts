@@ -327,6 +327,16 @@ export interface ApprovalCardSnapshot {
   timeout_at: string;
   created_at: string;
   evidence_refs: string[];
+  recovery_context?: {
+    last_exit_reason: RunExitStatus;
+    current_freeze_version: string;
+    current_story: string;
+    latest_evidence_path: string;
+    recommended_next_action: string;
+    resume_gate: "owner" | "takeover";
+    paused_run_id: string;
+    paused_run_role: RunRole;
+  } | null;
 }
 
 export interface ApprovalDecisionReceipt {
@@ -434,11 +444,11 @@ export interface JobManifestApprovalRecord {
   card_state: ApprovalCardState;
   card_type: string;
   requested_action: string;
-  decision: string;
+  decision: string | null;
   snapshot_path: string;
-  decision_path: string;
+  decision_path: string | null;
   summary_zh_ref: string;
-  decided_at: string;
+  decided_at: string | null;
 }
 
 export interface JobManifestArtifactRecord {
