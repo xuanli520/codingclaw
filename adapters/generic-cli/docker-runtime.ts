@@ -1,5 +1,5 @@
 import { dirname, isAbsolute, join, resolve } from "node:path";
-import { ensureDir, toPosixPath, uniqueStrings, writeJson } from "../../core/loop/support.ts";
+import { ensureDir, readText, sha256Text, toPosixPath, uniqueStrings, writeJson } from "../../core/loop/support.ts";
 import type {
   ContainerPathMap,
   ContainerPathMount,
@@ -7,9 +7,10 @@ import type {
   RunEnvelope,
   RunExitStatus,
   RunRole,
+  TaskPacket,
 } from "../../core/contracts/types.ts";
 
-const CONTAINER_PATHS = {
+export const CONTAINER_PATHS = {
   repo: "/work/repo",
   state: "/work/state",
   artifacts: "/work/artifacts",
@@ -18,6 +19,7 @@ const CONTAINER_PATHS = {
 } as const;
 
 const DEFAULT_BASE_IMAGE = "codingclaw-worker-base:phase1-local";
+const IMAGE_SIGNATURE_LABEL = "io.codingclaw.image-signature";
 
 const DEFAULT_ROLE_IMAGES: Record<"builder" | "qa", string> = {
   builder: "codingclaw-worker-builder:phase1-local",
@@ -70,6 +72,17 @@ interface CommandExecutionResult {
   stdout: string;
   stderr: string;
   spawn_error: string | null;
+}
+
+interface DockerMappedPaths {
+  repo_path: string;
+  state_path: string;
+  artifact_path: string;
+  runtime_home: string;
+}
+
+export interface DockerPathMappingRequest extends DockerMappedPaths {
+  run_role?: RunRole;
 }
 
 function normalizeHostPath(value: string): string {
@@ -132,39 +145,52 @@ export class DockerPathMapper {
   }
 }
 
-export function buildDockerPathMapping(envelope: RunEnvelope): DockerPathMapper {
+export function buildDockerPathMapping(paths: DockerPathMappingRequest): DockerPathMapper {
   return new DockerPathMapper([
     {
       name: "repo",
-      host_path: envelope.repo_path,
+      host_path: paths.repo_path,
       container_path: CONTAINER_PATHS.repo,
-      read_only: true,
+      read_only: paths.run_role !== "builder",
     },
     {
       name: "state",
-      host_path: envelope.state_path,
+      host_path: paths.state_path,
       container_path: CONTAINER_PATHS.state,
       read_only: false,
     },
     {
       name: "artifacts",
-      host_path: artifactRootFromRunRoot(envelope.artifact_path),
+      host_path: artifactRootFromRunRoot(paths.artifact_path),
       container_path: CONTAINER_PATHS.artifacts,
       read_only: false,
     },
     {
       name: "runtime-home",
-      host_path: envelope.runtime_home,
+      host_path: paths.runtime_home,
       container_path: CONTAINER_PATHS.runtimeHome,
       read_only: false,
     },
     {
       name: "cache",
-      host_path: join(envelope.runtime_home, "cache"),
+      host_path: join(paths.runtime_home, "cache"),
       container_path: CONTAINER_PATHS.cache,
       read_only: false,
     },
   ]);
+}
+
+export function containerizeTaskPacket(taskPacket: TaskPacket, paths: DockerMappedPaths): TaskPacket {
+  const mapper = buildDockerPathMapping(paths);
+  return {
+    ...taskPacket,
+    repo_path: mapper.mapPath(taskPacket.repo_path),
+    state_path: mapper.mapPath(taskPacket.state_path),
+    artifact_path: mapper.mapPath(taskPacket.artifact_path),
+    runtime_home: mapper.mapPath(taskPacket.runtime_home),
+    previous_handoff_path: mapper.mapPath(taskPacket.previous_handoff_path),
+    requested_capabilities: uniqueStrings([...taskPacket.requested_capabilities, "container_control"]),
+  };
 }
 
 function buildContainerPathMap(envelope: RunEnvelope, mapper: DockerPathMapper): ContainerPathMap {
@@ -241,6 +267,36 @@ function mountArg(mount: ContainerPathMount): string {
   return `type=bind,source=${mount.host_path},target=${mount.container_path}${mode}`;
 }
 
+function dockerUserArgs(): string[] {
+  if (typeof process.getuid !== "function" || typeof process.getgid !== "function") {
+    return [];
+  }
+  return ["--user", `${process.getuid()}:${process.getgid()}`];
+}
+
+function normalizeImageSignature(value: string): string | null {
+  const normalized = value.trim();
+  if (!normalized || normalized === "<no value>") {
+    return null;
+  }
+  return normalized;
+}
+
+async function buildImageSignature(
+  dockerfilePath: string,
+  buildArgs: string[],
+  extraInputs: string[] = [],
+): Promise<string> {
+  return sha256Text(
+    JSON.stringify({
+      dockerfile_path: toPosixPath(dockerfilePath),
+      dockerfile_text: await readText(dockerfilePath),
+      build_args: buildArgs,
+      extra_inputs: extraInputs,
+    }),
+  );
+}
+
 async function spawnCommand(command: string[], cwd: string): Promise<CommandExecutionResult> {
   try {
     const handle = Bun.spawn({
@@ -309,28 +365,52 @@ export class DockerWorkerLauncher implements RoleImageResolver {
     image: string,
     dockerfilePath: string,
     buildArgs: string[] = [],
+    extraSignatureInputs: string[] = [],
   ): Promise<CommandExecutionResult | null> {
-    if (this.preparedImages.has(image)) {
+    const signature = await buildImageSignature(dockerfilePath, buildArgs, extraSignatureInputs);
+    const preparedKey = `${image}@${signature}`;
+    if (this.preparedImages.has(preparedKey)) {
       return null;
     }
 
-    const inspect = await spawnCommand([this.dockerExecutable, "image", "inspect", image], this.repoRoot);
+    const inspect = await spawnCommand(
+      [
+        this.dockerExecutable,
+        "image",
+        "inspect",
+        image,
+        "--format",
+        `{{index .Config.Labels "${IMAGE_SIGNATURE_LABEL}"}}`,
+      ],
+      this.repoRoot,
+    );
     if (inspect.spawn_error) {
       return inspect;
     }
-    if (inspect.exitCode === 0) {
-      this.preparedImages.add(image);
+    if (inspect.exitCode === 0 && normalizeImageSignature(inspect.stdout) === signature) {
+      this.preparedImages.add(preparedKey);
       return null;
     }
 
     const build = await spawnCommand(
-      [this.dockerExecutable, "build", "--file", dockerfilePath, "--tag", image, ...buildArgs, this.repoRoot],
+      [
+        this.dockerExecutable,
+        "build",
+        "--file",
+        dockerfilePath,
+        "--tag",
+        image,
+        "--label",
+        `${IMAGE_SIGNATURE_LABEL}=${signature}`,
+        ...buildArgs,
+        this.repoRoot,
+      ],
       this.repoRoot,
     );
     if (build.spawn_error || build.exitCode !== 0) {
       return build;
     }
-    this.preparedImages.add(image);
+    this.preparedImages.add(preparedKey);
     return null;
   }
 
@@ -338,14 +418,18 @@ export class DockerWorkerLauncher implements RoleImageResolver {
     if (runRole !== "builder" && runRole !== "qa") {
       throw new Error(`unsupported docker worker role: ${runRole}`);
     }
-    const baseFailure = await this.ensureImage(this.baseImage, buildImageDockerfile(this.repoRoot, "base"));
+    const baseDockerfilePath = buildImageDockerfile(this.repoRoot, "base");
+    const baseSignature = await buildImageSignature(baseDockerfilePath, []);
+    const baseFailure = await this.ensureImage(this.baseImage, baseDockerfilePath);
     if (baseFailure) {
       return baseFailure;
     }
-    return this.ensureImage(image, buildImageDockerfile(this.repoRoot, runRole), [
-      "--build-arg",
-      `CODINGCLAW_BASE_IMAGE=${this.baseImage}`,
-    ]);
+    return this.ensureImage(
+      image,
+      buildImageDockerfile(this.repoRoot, runRole),
+      ["--build-arg", `CODINGCLAW_BASE_IMAGE=${this.baseImage}`],
+      [this.baseImage, baseSignature],
+    );
   }
 
   async launch(request: DockerWorkerLaunchRequest): Promise<DockerWorkerLaunchResult> {
@@ -366,6 +450,7 @@ export class DockerWorkerLauncher implements RoleImageResolver {
       "--rm",
       "--network",
       "none",
+      ...dockerUserArgs(),
       "--workdir",
       request.runtime.workdir,
       "--env",

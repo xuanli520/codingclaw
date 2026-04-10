@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import { GenericCliAdapter } from "../../adapters/generic-cli/adapter.ts";
+import { containerizeTaskPacket } from "../../adapters/generic-cli/docker-runtime.ts";
 import { writeApprovalArchive } from "../../ops/archive/approvals.ts";
 import {
   buildEnvironmentSnapshotMetadata,
@@ -186,9 +187,15 @@ async function buildTaskPacket(
   );
 
   await ensureDir(join(artifactRoot, "metadata"));
+  const containerizedPacket = containerizeTaskPacket(packetWithoutChecksum, {
+    repo_path: repoRoot,
+    state_path: stateRoot,
+    artifact_path: artifactRoot,
+    runtime_home: runtimeHome,
+  });
   const finalPacket: TaskPacket = {
-    ...packetWithoutChecksum,
-    task_packet_sha256: taskPacketDigest(packetWithoutChecksum),
+    ...containerizedPacket,
+    task_packet_sha256: taskPacketDigest(containerizedPacket),
   };
   await writeJson(taskPacketPath, finalPacket);
 
@@ -202,6 +209,9 @@ function taskPacketDigest(taskPacket: TaskPacket): string {
 async function buildRunEnvelope(
   repoRoot: string,
   taskPacket: TaskPacket,
+  stateRoot: string,
+  artifactRoot: string,
+  runtimeHome: string,
   previousHandoffPath: string,
   approvalSnapshotPath: string,
   traceContext: Record<string, unknown>,
@@ -212,12 +222,12 @@ async function buildRunEnvelope(
       __RUN_ID__: taskPacket.run_id,
       __RUN_ROLE__: taskPacket.run_role,
       __RUN_ATTEMPT__: taskPacket.run_attempt,
-      __REPO_PATH__: taskPacket.repo_path,
+      __REPO_PATH__: repoRoot,
       __BASE_COMMIT__: taskPacket.base_commit,
-      __STATE_PATH__: taskPacket.state_path,
-      __ARTIFACT_PATH__: taskPacket.artifact_path,
-      __RUNTIME_HOME__: taskPacket.runtime_home,
-      __TASK_PACKET_PATH__: join(taskPacket.artifact_path, "metadata", "task-packet.en.json"),
+      __STATE_PATH__: stateRoot,
+      __ARTIFACT_PATH__: artifactRoot,
+      __RUNTIME_HOME__: runtimeHome,
+      __TASK_PACKET_PATH__: join(artifactRoot, "metadata", "task-packet.en.json"),
       __TASK_PACKET_SHA256__: taskPacket.task_packet_sha256,
       __PREVIOUS_HANDOFF_PATH__: previousHandoffPath,
       __APPROVAL_SNAPSHOT_PATH__: approvalSnapshotPath,
@@ -227,7 +237,7 @@ async function buildRunEnvelope(
 
   return {
     ...envelope,
-    requested_capabilities: uniqueStrings([...envelope.requested_capabilities, "container_control"]),
+    requested_capabilities: taskPacket.requested_capabilities,
     container_runtime: null,
   };
 }
@@ -677,6 +687,9 @@ export async function runPhase1Local(repoRoot: string): Promise<Phase1RunSummary
   const builderEnvelope = await buildRunEnvelope(
     repoRoot,
     builderTaskPacket,
+    layout.archiveStateRoot,
+    builderRunRoot,
+    layout.runtimeHomeRoot,
     builderPreviousHandoffPath,
     approvalRecord.snapshot_path,
     {
@@ -706,6 +719,9 @@ export async function runPhase1Local(repoRoot: string): Promise<Phase1RunSummary
   const qaEnvelope = await buildRunEnvelope(
     repoRoot,
     qaTaskPacket,
+    layout.archiveStateRoot,
+    qaRunRoot,
+    layout.runtimeHomeRoot,
     qaPreviousHandoffPath,
     approvalRecord.snapshot_path,
     {

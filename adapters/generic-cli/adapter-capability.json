@@ -17,6 +17,7 @@
     "filesystem_write": {
       "mode": "allow",
       "scope": [
+        "repo",
         "state",
         "artifacts",
         "runtime-home"
