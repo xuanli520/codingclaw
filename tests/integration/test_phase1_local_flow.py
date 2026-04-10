@@ -307,6 +307,16 @@ def write_fake_docker(tmp_path: Path) -> Path:
 
                 if envelope["run_role"] == "builder":
                     output = create_builder_outputs(envelope, task_packet, artifact_root)
+                    if mode == "builder_awaiting_approval":
+                        output["status"] = "AWAITING_APPROVAL"
+                        output["open"] = ["owner approval required"]
+                        output["blockers"] = ["Privileged action requires owner approval"]
+                        output["next_action"] = "approve requested action or choose an alternative"
+                    if mode == "builder_awaiting_credentials":
+                        output["status"] = "AWAITING_CREDENTIALS"
+                        output["open"] = ["credentials required"]
+                        output["blockers"] = ["A credential is required before continuing"]
+                        output["next_action"] = "provide the requested credential or choose an alternative"
                     if mode == "builder_head_shift":
                         mutate_head(map_path(envelope["repo_path"], mounts))
                 else:
@@ -349,8 +359,7 @@ def load_capture(capture_dir: Path, run_role: str) -> dict:
 
 def assert_builder_failure_bundle(job_root: Path) -> None:
     run_roots = sorted(path for path in (job_root / "artifacts" / "runs").iterdir() if path.is_dir())
-    assert len(run_roots) == 1
-    builder_run_root = run_roots[0]
+    builder_run_root = next(path for path in run_roots if path.name.startswith("run-builder-"))
     artifact_index = json.loads((builder_run_root / "metadata" / "artifact-index.json").read_text(encoding="utf-8"))
     indexed_paths = {entry["path"] for entry in artifact_index["artifacts"]}
 
@@ -389,6 +398,7 @@ def assert_recovery_pause_context(manifest: dict, job_root: Path, expected_statu
     assert recovery_card["recovery_context"]["latest_evidence_path"]
     assert recovery_card["recovery_context"]["recommended_next_action"]
     assert recovery_card["recovery_context"]["resume_gate"] == "owner"
+    assert pause_context["resume_action"] == recovery_card["recovery_context"]["recommended_next_action"]
 
 
 def assert_recovery_state_mirror(job_root: Path, recovery_card_id: str) -> None:
@@ -480,12 +490,20 @@ def test_phase1_local_builder_container_materialization_uses_read_only_inputs_an
         (repo_root / "adapters" / "generic-cli" / "adapter-capability.json").read_text(encoding="utf-8")
     )
     filesystem_write_scope = set(capability_manifest["capabilities"]["filesystem_write"]["scope"])
+    repo_job_root_path = f"/work/repo/jobs/job-phase1-local"
+    repo_run_root_path = f"{repo_job_root_path}/artifacts/runs/{builder_envelope['run_id']}"
+    task_packet_target = f"{builder_envelope['artifact_path']}/metadata/task-packet.en.json"
 
     assert mounts["/work/repo"].get("readonly") != "true"
+    assert mounts[repo_job_root_path]["readonly"] == "true"
     assert mounts["/work/state"]["readonly"] == "true"
     assert mounts["/work/artifacts"]["readonly"] == "true"
     assert mounts[builder_envelope["artifact_path"]].get("readonly") != "true"
+    assert mounts[repo_run_root_path].get("readonly") != "true"
+    assert mounts[task_packet_target]["readonly"] == "true"
+    assert mounts[f"{repo_run_root_path}/metadata/task-packet.en.json"]["readonly"] == "true"
     assert mounts["/work/runtime-home"].get("readonly") != "true"
+    assert mounts[f"{repo_job_root_path}/runtime-home/phase1-local"].get("readonly") != "true"
     assert filesystem_write_scope == {"repo", "run-artifacts", "runtime-home"}
 
     manifest = json.loads((job_root / "job-manifest.json").read_text(encoding="utf-8"))
@@ -548,8 +566,12 @@ def test_phase1_local_builder_failed_infra_stops_before_qa(tmp_path):
 
     job_root = repo_root / "jobs" / "job-phase1-local"
     manifest = json.loads((job_root / "job-manifest.json").read_text(encoding="utf-8"))
+    freeze = json.loads((job_root / "contract-freeze.json").read_text(encoding="utf-8"))
     archived_trace = json.loads((job_root / "state" / "trace-index.json").read_text(encoding="utf-8"))
     live_trace = json.loads((repo_root / "state" / "trace-index.json").read_text(encoding="utf-8"))
+    qa_run_id = next(run_id for run_id in freeze["task_packet_digests"] if run_id.startswith("run-qa-"))
+    qa_task_packet_path = job_root / "artifacts" / "runs" / qa_run_id / "metadata" / "task-packet.en.json"
+    qa_task_packet = json.loads(qa_task_packet_path.read_text(encoding="utf-8"))
 
     assert [run["run_role"] for run in manifest["runs"]] == ["builder"]
     assert [run["run_exit_status"] for run in manifest["runs"]] == ["FAILED_INFRA"]
@@ -559,10 +581,62 @@ def test_phase1_local_builder_failed_infra_stops_before_qa(tmp_path):
     assert archived_trace["stories"]["STORY-PHASE1-LOCAL-001"]["latest_run_role"] == "builder"
     assert archived_trace["stories"]["STORY-PHASE1-LOCAL-001"]["latest_qa_status"] == "PENDING"
     assert live_trace == archived_trace
+    assert qa_task_packet["task_packet_sha256"] == freeze["task_packet_digests"][qa_run_id]
+    assert f"artifacts/runs/{qa_run_id}/metadata/task-packet.en.json" in (job_root / "checksums.txt").read_text(encoding="utf-8")
+    assert sorted(path.relative_to(job_root / "artifacts" / "runs" / qa_run_id).as_posix() for path in qa_task_packet_path.parent.rglob("*") if path.is_file()) == [
+        "metadata/task-packet.en.json"
+    ]
     assert not (job_root / "artifacts" / "final" / "final-summary.en.md").exists()
     assert_builder_failure_bundle(job_root)
     assert_recovery_pause_context(manifest, job_root, "FAILED_INFRA")
     assert_recovery_state_mirror(job_root, manifest["pause_context"]["related_card_id"])
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("mode", "expected_status", "expected_capability"),
+    [
+        ("builder_awaiting_approval", "AWAITING_APPROVAL", "interactive_approval"),
+        ("builder_awaiting_credentials", "AWAITING_CREDENTIALS", "secret_injection"),
+    ],
+)
+@pytest.mark.skipif(shutil.which("bun") is None, reason="bun is required")
+def test_phase1_local_waiting_recovery_card_preserves_approval_request_details(
+    tmp_path,
+    mode,
+    expected_status,
+    expected_capability,
+):
+    repo_root = export_repo(tmp_path)
+    fake_docker = write_fake_docker(tmp_path)
+    result = run_phase1(
+        repo_root,
+        {
+            "CODINGCLAW_DOCKER_BIN": str(fake_docker),
+            "CODINGCLAW_FAKE_DOCKER_MODE": mode,
+        },
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
+
+    job_root = repo_root / "jobs" / "job-phase1-local"
+    manifest = json.loads((job_root / "job-manifest.json").read_text(encoding="utf-8"))
+    recovery_record = manifest["approvals"][-1]
+    recovery_card = json.loads(
+        (job_root / "approvals" / recovery_record["card_id"] / "approval-card.json").read_text(encoding="utf-8")
+    )
+    approval_request = recovery_card["approval_request"]
+
+    assert [run["run_role"] for run in manifest["runs"]] == ["builder"]
+    assert [run["run_exit_status"] for run in manifest["runs"]] == [expected_status]
+    assert manifest["status"] == "AWAITING_OWNER"
+    assert manifest["pause_context"]["waiting_on"] == "owner"
+    assert approval_request["run_id"] == manifest["runs"][0]["run_id"]
+    assert approval_request["run_role"] == "builder"
+    assert approval_request["requested_capability"] == expected_capability
+    assert approval_request["reason"]
+    assert approval_request["suggested_alternatives"]
+    assert approval_request == recovery_record["approval_request"]
 
 
 @pytest.mark.integration

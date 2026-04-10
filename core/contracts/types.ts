@@ -82,7 +82,18 @@ export interface TaskPacket {
   story: StoryContract;
 }
 
-export type ContainerMountName = "repo" | "state" | "artifacts" | "run-artifacts" | "runtime-home" | "cache";
+export type ContainerMountName =
+  | "repo"
+  | "repo-job-root"
+  | "state"
+  | "artifacts"
+  | "run-artifacts"
+  | "repo-run-artifacts"
+  | "task-packet"
+  | "repo-task-packet"
+  | "runtime-home"
+  | "repo-runtime-home"
+  | "cache";
 
 export interface ContainerPathMount {
   name: ContainerMountName;
@@ -313,6 +324,20 @@ export interface LoopMetricsFile {
   runs: LoopMetricEntry[];
 }
 
+export interface ApprovalRequestSnapshot {
+  request_id: string;
+  job_id: string;
+  story_id: string;
+  run_id: string;
+  run_role: RunRole;
+  action_summary: string;
+  reason: string;
+  risk_level: string;
+  requested_capability: string;
+  suggested_alternatives: string[];
+  timeout_at: string;
+}
+
 export interface ApprovalCardSnapshot {
   job_id: string;
   card_id: string;
@@ -327,6 +352,7 @@ export interface ApprovalCardSnapshot {
   timeout_at: string;
   created_at: string;
   evidence_refs: string[];
+  approval_request?: ApprovalRequestSnapshot | null;
   recovery_context?: {
     last_exit_reason: RunExitStatus;
     current_freeze_version: string;
@@ -449,6 +475,7 @@ export interface JobManifestApprovalRecord {
   decision_path: string | null;
   summary_zh_ref: string;
   decided_at: string | null;
+  approval_request?: ApprovalRequestSnapshot | null;
 }
 
 export interface JobManifestArtifactRecord {

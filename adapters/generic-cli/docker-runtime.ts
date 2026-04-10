@@ -35,6 +35,7 @@ const DOCKER_BIN_ENV_VAR = "CODINGCLAW_DOCKER_BIN";
 
 interface NormalizedContainerPathMount extends ContainerPathMount {
   normalized_host_path: string;
+  mount_order: number;
 }
 
 export interface RoleImageResolver {
@@ -99,6 +100,22 @@ function runRootContainerPath(runRoot: string): string {
   return `${CONTAINER_PATHS.artifacts}/runs/${basename(normalizeHostPath(runRoot))}`;
 }
 
+function taskPacketPathFromRunRoot(runRoot: string): string {
+  return join(runRoot, "metadata", "task-packet.en.json");
+}
+
+function repoContainerPathForHostPath(repoRoot: string, hostPath: string): string | null {
+  const normalizedRepoRoot = normalizeHostPath(repoRoot);
+  const normalizedHostPath = normalizeHostPath(hostPath);
+  if (normalizedHostPath === normalizedRepoRoot) {
+    return CONTAINER_PATHS.repo;
+  }
+  if (!normalizedHostPath.startsWith(`${normalizedRepoRoot}/`)) {
+    return null;
+  }
+  return `${CONTAINER_PATHS.repo}${normalizedHostPath.slice(normalizedRepoRoot.length)}`;
+}
+
 export function resolveDockerWorkerImage(runRole: RunRole): string {
   if (runRole !== "builder" && runRole !== "qa") {
     throw new Error(`unsupported docker worker role: ${runRole}`);
@@ -114,11 +131,15 @@ export class DockerPathMapper {
   constructor(mounts: ContainerPathMount[]) {
     this.mounts = mounts;
     this.normalizedMounts = mounts
-      .map((mount) => ({
+      .map((mount, mountOrder) => ({
         ...mount,
         normalized_host_path: normalizeHostPath(mount.host_path),
+        mount_order: mountOrder,
       }))
-      .sort((left, right) => right.normalized_host_path.length - left.normalized_host_path.length);
+      .sort(
+        (left, right) =>
+          right.normalized_host_path.length - left.normalized_host_path.length || left.mount_order - right.mount_order,
+      );
   }
 
   mapPath(hostPath: string): string {
@@ -153,13 +174,30 @@ export class DockerPathMapper {
 
 export function buildDockerPathMapping(paths: DockerPathMappingRequest): DockerPathMapper {
   const repoReadOnly = paths.run_role === "builder" ? false : true;
-  return new DockerPathMapper([
+  const jobRoot = dirname(paths.state_path);
+  const runRootContainer = runRootContainerPath(paths.artifact_path);
+  const taskPacketPath = taskPacketPathFromRunRoot(paths.artifact_path);
+  const repoJobRootPath = repoContainerPathForHostPath(paths.repo_path, jobRoot);
+  const repoRunRootPath = repoContainerPathForHostPath(paths.repo_path, paths.artifact_path);
+  const repoTaskPacketPath = repoContainerPathForHostPath(paths.repo_path, taskPacketPath);
+  const repoRuntimeHomePath = repoContainerPathForHostPath(paths.repo_path, paths.runtime_home);
+  const mounts: ContainerPathMount[] = [
     {
       name: "repo",
       host_path: paths.repo_path,
       container_path: CONTAINER_PATHS.repo,
       read_only: repoReadOnly,
     },
+    ...(repoJobRootPath === null
+      ? []
+      : [
+          {
+            name: "repo-job-root" as const,
+            host_path: jobRoot,
+            container_path: repoJobRootPath,
+            read_only: true,
+          },
+        ]),
     {
       name: "state",
       host_path: paths.state_path,
@@ -175,22 +213,59 @@ export function buildDockerPathMapping(paths: DockerPathMappingRequest): DockerP
     {
       name: "run-artifacts",
       host_path: paths.artifact_path,
-      container_path: runRootContainerPath(paths.artifact_path),
+      container_path: runRootContainer,
       read_only: false,
     },
+    ...(repoRunRootPath === null
+      ? []
+      : [
+          {
+            name: "repo-run-artifacts" as const,
+            host_path: paths.artifact_path,
+            container_path: repoRunRootPath,
+            read_only: false,
+          },
+        ]),
+    {
+      name: "task-packet",
+      host_path: taskPacketPath,
+      container_path: `${runRootContainer}/metadata/task-packet.en.json`,
+      read_only: true,
+    },
+    ...(repoTaskPacketPath === null
+      ? []
+      : [
+          {
+            name: "repo-task-packet" as const,
+            host_path: taskPacketPath,
+            container_path: repoTaskPacketPath,
+            read_only: true,
+          },
+        ]),
     {
       name: "runtime-home",
       host_path: paths.runtime_home,
       container_path: CONTAINER_PATHS.runtimeHome,
       read_only: false,
     },
+    ...(repoRuntimeHomePath === null
+      ? []
+      : [
+          {
+            name: "repo-runtime-home" as const,
+            host_path: paths.runtime_home,
+            container_path: repoRuntimeHomePath,
+            read_only: false,
+          },
+        ]),
     {
       name: "cache",
       host_path: join(paths.runtime_home, "cache"),
       container_path: CONTAINER_PATHS.cache,
       read_only: false,
     },
-  ]);
+  ];
+  return new DockerPathMapper(mounts);
 }
 
 function buildContainerPathMap(envelope: RunEnvelope, mapper: DockerPathMapper): ContainerPathMap {

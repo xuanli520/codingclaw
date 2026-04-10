@@ -1,4 +1,4 @@
-import type { ApprovalCardSnapshot, ApprovalDecisionReceipt } from "../../core/contracts/types.ts";
+import type { ApprovalCardSnapshot, ApprovalDecisionReceipt, ApprovalRequestSnapshot } from "../../core/contracts/types.ts";
 import { sha256Text, writeJson, writeText } from "../../core/loop/support.ts";
 
 export interface ApprovalArchiveRecord {
@@ -18,12 +18,21 @@ export interface ApprovalArchiveRecord {
   waiting_on: "owner" | "takeover" | null;
   resume_action: string | null;
   paused_run_id: string | null;
+  approval_request: ApprovalRequestSnapshot | null;
 }
 
 function renderApprovalSummary(card: ApprovalCardSnapshot, decision: ApprovalDecisionReceipt | null): string {
   if (decision === null) {
     const latestEvidencePath = card.recovery_context?.latest_evidence_path ?? (card.evidence_refs[0] ?? "none");
     const recommendedNextAction = card.recovery_context?.recommended_next_action ?? card.requested_action;
+    const approvalRequestLines =
+      card.approval_request === null || card.approval_request === undefined
+        ? []
+        : [
+            `- 请求能力: ${card.approval_request.requested_capability}`,
+            `- 请求原因: ${card.approval_request.reason}`,
+            `- 替代方案: ${card.approval_request.suggested_alternatives.join(", ")}`,
+          ];
     return [
       "# 审批摘要",
       "",
@@ -35,6 +44,7 @@ function renderApprovalSummary(card: ApprovalCardSnapshot, decision: ApprovalDec
       `- 当前摘要: ${card.summary_zh}`,
       `- 最新证据: ${latestEvidencePath}`,
       `- 下一步: ${recommendedNextAction}`,
+      ...approvalRequestLines,
       "",
     ].join("\n");
   }
@@ -84,7 +94,8 @@ export async function writeApprovalArchive(
     decided_at: decision?.decided_at ?? null,
     timeout_at: card.timeout_at,
     waiting_on: card.recovery_context?.resume_gate ?? null,
-    resume_action: card.recovery_context === null || card.recovery_context === undefined ? null : card.requested_action,
+    resume_action: card.recovery_context?.recommended_next_action ?? null,
     paused_run_id: card.recovery_context?.paused_run_id ?? null,
+    approval_request: card.approval_request ?? null,
   };
 }

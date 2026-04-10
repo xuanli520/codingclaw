@@ -33,6 +33,7 @@ import type {
   AdapterExecutionResult,
   ApprovalCardSnapshot,
   ApprovalDecisionReceipt,
+  ApprovalRequestSnapshot,
   ChecksumRecord,
   ContractFreezeMetadata,
   JobManifest,
@@ -361,6 +362,7 @@ function buildManifestApprovalRecord(
       approvalRecord.decision_path === null ? null : layout.relativeToJobRoot(approvalRecord.decision_path),
     summary_zh_ref: layout.relativeToJobRoot(approvalRecord.summary_path),
     decided_at: approvalRecord.decided_at,
+    ...(approvalRecord.approval_request === null ? {} : { approval_request: approvalRecord.approval_request }),
   };
 }
 
@@ -456,11 +458,89 @@ function recoveryRiskLevel(status: RunExitStatus): string {
   return "medium";
 }
 
+function recoveryRequestedAction(status: RunExitStatus, resumeGate: "owner" | "takeover"): string {
+  if (status === "AWAITING_APPROVAL") {
+    return "Review the executor approval request before continuing.";
+  }
+  if (status === "AWAITING_CREDENTIALS") {
+    return "Provide the required credential or choose an alternative before continuing.";
+  }
+  if (resumeGate === "takeover") {
+    return "Review the blocked run and trigger takeover before continuing.";
+  }
+  return "Review the blocked run and decide how to resume the job.";
+}
+
+function recoveryCandidateActions(status: RunExitStatus, resumeGate: "owner" | "takeover"): string[] {
+  if (status === "AWAITING_APPROVAL") {
+    return ["approve requested action", "request revision", "trigger takeover"];
+  }
+  if (status === "AWAITING_CREDENTIALS") {
+    return ["provide credentials", "request revision", "trigger takeover"];
+  }
+  if (resumeGate === "takeover") {
+    return ["trigger takeover", "resume job", "request revision"];
+  }
+  return ["resume job", "request revision", "trigger takeover"];
+}
+
+function approvalRequestReason(execution: AdapterExecutionResult): string {
+  const blocker = execution.workerOutput.blockers.find((value) => value.trim().length > 0);
+  if (blocker !== undefined) {
+    return blocker;
+  }
+  if (execution.workerOutput.next_action.trim().length > 0) {
+    return execution.workerOutput.next_action;
+  }
+  return `worker reported ${execution.runResult.status}`;
+}
+
+function buildRecoveryApprovalRequest(
+  taskPacket: TaskPacket,
+  execution: AdapterExecutionResult,
+  timeoutAt: string,
+  riskLevel: string,
+): ApprovalRequestSnapshot | null {
+  if (execution.runResult.status === "AWAITING_APPROVAL") {
+    return {
+      request_id: `approval-request-${execution.runResult.run_id}`,
+      job_id: taskPacket.job_id,
+      story_id: taskPacket.story.story_id,
+      run_id: execution.runResult.run_id,
+      run_role: execution.runResult.run_role,
+      action_summary: `${execution.runResult.run_role} requested owner approval before continuing.`,
+      reason: approvalRequestReason(execution),
+      risk_level: riskLevel,
+      requested_capability: "interactive_approval",
+      suggested_alternatives: ["request revision", "trigger takeover"],
+      timeout_at: timeoutAt,
+    };
+  }
+  if (execution.runResult.status === "AWAITING_CREDENTIALS") {
+    return {
+      request_id: `approval-request-${execution.runResult.run_id}`,
+      job_id: taskPacket.job_id,
+      story_id: taskPacket.story.story_id,
+      run_id: execution.runResult.run_id,
+      run_role: execution.runResult.run_role,
+      action_summary: `${execution.runResult.run_role} requested credentials before continuing.`,
+      reason: approvalRequestReason(execution),
+      risk_level: riskLevel,
+      requested_capability: "secret_injection",
+      suggested_alternatives: ["continue without credentials", "request revision", "trigger takeover"],
+      timeout_at: timeoutAt,
+    };
+  }
+  return null;
+}
+
 function buildRecoveryCard(taskPacket: TaskPacket, execution: AdapterExecutionResult): ApprovalCardSnapshot {
   const jobState = mapRunExitToJobState(execution.runResult.status, execution.runResult.run_role);
   const resumeGate = jobState === "AWAITING_TAKEOVER" ? "takeover" : "owner";
   const latestEvidenceRef = latestEvidencePath(execution);
   const timeoutAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+  const riskLevel = recoveryRiskLevel(execution.runResult.status);
+  const approvalRequest = buildRecoveryApprovalRequest(taskPacket, execution, timeoutAt, riskLevel);
   return {
     job_id: taskPacket.job_id,
     card_id: `card-recovery-${execution.runResult.run_id}`,
@@ -468,16 +548,10 @@ function buildRecoveryCard(taskPacket: TaskPacket, execution: AdapterExecutionRe
     card_type: "recovery",
     story_id: taskPacket.story.story_id,
     freeze_version: taskPacket.freeze_version,
-    risk_level: recoveryRiskLevel(execution.runResult.status),
+    risk_level: riskLevel,
     summary_zh: `运行 ${execution.runResult.run_id} 已以 ${execution.runResult.status} 停止，当前故事需要${resumeGate === "takeover" ? "接管" : "人工决策"}后继续。`,
-    requested_action:
-      resumeGate === "takeover"
-        ? "Review the blocked run and trigger takeover before continuing."
-        : "Review the blocked run and decide how to resume the job.",
-    candidate_actions:
-      resumeGate === "takeover"
-        ? ["trigger takeover", "resume job", "request revision"]
-        : ["resume job", "request revision", "trigger takeover"],
+    requested_action: recoveryRequestedAction(execution.runResult.status, resumeGate),
+    candidate_actions: recoveryCandidateActions(execution.runResult.status, resumeGate),
     timeout_at: timeoutAt,
     created_at: execution.runResult.ended_at,
     evidence_refs: uniqueStrings([
@@ -485,6 +559,7 @@ function buildRecoveryCard(taskPacket: TaskPacket, execution: AdapterExecutionRe
       `artifacts/runs/${execution.runResult.run_id}/metadata/run-result.json`,
       `artifacts/runs/${execution.runResult.run_id}/reports/handoff.en.md`,
     ]),
+    ...(approvalRequest === null ? {} : { approval_request: approvalRequest }),
     recovery_context: {
       last_exit_reason: execution.runResult.status,
       current_freeze_version: taskPacket.freeze_version,
@@ -729,7 +804,6 @@ export async function runPhase1Local(repoRoot: string): Promise<Phase1RunSummary
     qaRunRoot,
     layout.runtimeHomeRoot,
     qaPreviousHandoffPath,
-    false,
   );
 
   const approvalRecord = await writeApprovalArchive(layout.approvalRoot(approvalCard.card_id), approvalCard, decision);
@@ -930,6 +1004,8 @@ export async function runPhase1Local(repoRoot: string): Promise<Phase1RunSummary
         finalization.final_summary_path,
       );
     }
+  } else {
+    extraChecksumPaths.push(layout.relativeToJobRoot(join(qaRunRoot, "metadata", "task-packet.en.json")));
   }
 
   const checksumRecords = await buildChecksumRecords(
