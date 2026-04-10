@@ -18,8 +18,7 @@
       "mode": "allow",
       "scope": [
         "repo",
-        "state",
-        "artifacts",
+        "run-artifacts",
         "runtime-home"
       ],
       "cost_level": "low",

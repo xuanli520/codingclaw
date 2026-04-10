@@ -277,10 +277,15 @@ def write_fake_docker(tmp_path: Path) -> Path:
                 mode = os.environ.get("CODINGCLAW_FAKE_DOCKER_MODE", "success")
                 if mode == "slow_success":
                     time.sleep(float(os.environ.get("CODINGCLAW_FAKE_DOCKER_SLEEP", "1")))
+                if mode == "qa_timeout" and envelope["run_role"] == "qa":
+                    time.sleep(float(os.environ.get("CODINGCLAW_FAKE_DOCKER_SLEEP", "1")))
 
                 if envelope["run_role"] == "builder":
                     output = create_builder_outputs(envelope, task_packet, artifact_root)
                 else:
+                    if mode == "qa_failed_infra":
+                        sys.stderr.write("docker: qa container failed before worker start\\n")
+                        return 125
                     qa_status = "FIXBACK_REQUIRED" if mode == "qa_fixback" else "SUCCESS"
                     output = create_qa_outputs(envelope, task_packet, artifact_root, qa_status)
 
@@ -397,10 +402,17 @@ def test_phase1_local_builder_container_materialization_uses_read_only_inputs_an
     assert builder_task_packet["artifact_path"].endswith(f"/artifacts/runs/{builder_envelope['run_id']}")
     assert str(repo_root) not in json.dumps(builder_task_packet, ensure_ascii=False)
 
-    assert mounts["/work/repo"]["readonly"] == "true"
+    capability_manifest = json.loads(
+        (repo_root / "adapters" / "generic-cli" / "adapter-capability.json").read_text(encoding="utf-8")
+    )
+    filesystem_write_scope = set(capability_manifest["capabilities"]["filesystem_write"]["scope"])
+
+    assert mounts["/work/repo"].get("readonly") != "true"
     assert mounts["/work/state"]["readonly"] == "true"
     assert mounts["/work/artifacts"]["readonly"] == "true"
     assert mounts[builder_envelope["artifact_path"]].get("readonly") != "true"
+    assert mounts["/work/runtime-home"].get("readonly") != "true"
+    assert filesystem_write_scope == {"repo", "run-artifacts", "runtime-home"}
 
 
 @pytest.mark.integration
@@ -426,6 +438,23 @@ def test_phase1_local_builder_failed_infra_stops_before_qa(tmp_path):
     assert live_trace == archived_trace
     assert not (job_root / "artifacts" / "final" / "final-summary.en.md").exists()
     assert_builder_failure_bundle(job_root)
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(shutil.which("bun") is None, reason="bun is required")
+def test_phase1_local_builder_failed_infra_command_log_records_docker_run(tmp_path):
+    repo_root = export_repo(tmp_path)
+    result = run_phase1(repo_root, {"CODINGCLAW_DOCKER_BIN": "does-not-exist"})
+
+    assert result.returncode == 0, result.stderr or result.stdout
+
+    job_root = repo_root / "jobs" / "job-phase1-local"
+    run_root = next(path for path in (job_root / "artifacts" / "runs").iterdir() if path.is_dir())
+    command_log = (run_root / "logs" / "command-log.txt").read_text(encoding="utf-8")
+
+    assert "command: does-not-exist run --rm --network none" in command_log
+    assert " image inspect " not in command_log
+    assert " build --file " not in command_log
 
 
 @pytest.mark.integration
@@ -457,6 +486,56 @@ def test_phase1_local_qa_fixback_closes_without_final_summary(tmp_path):
     assert archived_trace["stories"]["STORY-PHASE1-LOCAL-001"]["latest_qa_status"] == "FIXBACK_REQUIRED"
     assert live_trace == archived_trace
     assert not (job_root / "artifacts" / "final" / "final-summary.en.md").exists()
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("mode", "expected_status"),
+    [("qa_failed_infra", "FAILED_INFRA"), ("qa_timeout", "TIMEOUT")],
+)
+@pytest.mark.skipif(shutil.which("bun") is None, reason="bun is required")
+def test_phase1_local_qa_non_success_writes_required_qa_bundle(tmp_path, mode, expected_status):
+    repo_root = export_repo(tmp_path)
+    if mode == "qa_timeout":
+        write_time_limit_minutes(repo_root, 0.001)
+    fake_docker = write_fake_docker(tmp_path)
+    result = run_phase1(
+        repo_root,
+        {
+            "CODINGCLAW_DOCKER_BIN": str(fake_docker),
+            "CODINGCLAW_FAKE_DOCKER_MODE": mode,
+            "CODINGCLAW_FAKE_DOCKER_SLEEP": "1",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
+
+    job_root = repo_root / "jobs" / "job-phase1-local"
+    manifest = json.loads((job_root / "job-manifest.json").read_text(encoding="utf-8"))
+    archived_trace = json.loads((job_root / "state" / "trace-index.json").read_text(encoding="utf-8"))
+    run_roots = sorted(path for path in (job_root / "artifacts" / "runs").iterdir() if path.is_dir())
+    qa_run_root = run_roots[-1]
+    artifact_index = json.loads((qa_run_root / "metadata" / "artifact-index.json").read_text(encoding="utf-8"))
+    indexed_paths = {entry["path"] for entry in artifact_index["artifacts"]}
+
+    assert [run["run_role"] for run in manifest["runs"]] == ["builder", "qa"]
+    assert [run["run_exit_status"] for run in manifest["runs"]] == ["SUCCESS", expected_status]
+    assert manifest["status"] == "AWAITING_OWNER"
+    assert archived_trace["stories"]["STORY-PHASE1-LOCAL-001"]["latest_run_role"] == "qa"
+    assert archived_trace["stories"]["STORY-PHASE1-LOCAL-001"]["latest_qa_status"] == expected_status
+    assert not (job_root / "artifacts" / "final" / "final-summary.en.md").exists()
+
+    for relative_path in [
+        "reports/qa-report.en.md",
+        "reports/fixback-items.en.md",
+        "metadata/qa-verdict.json",
+        "evidence/test-results/qa-check.json",
+    ]:
+        assert (qa_run_root / relative_path).exists()
+        assert relative_path in indexed_paths
+
+    qa_verdict = json.loads((qa_run_root / "metadata" / "qa-verdict.json").read_text(encoding="utf-8"))
+    assert qa_verdict["status"] == expected_status
 
 
 @pytest.mark.integration

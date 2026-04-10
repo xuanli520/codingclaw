@@ -1,13 +1,14 @@
 import { join } from "node:path";
 import { buildArtifactIndex } from "../../ops/archive/artifact-index.ts";
 import { writeRunTimings, writeWorkerLog } from "../../ops/archive/run-metadata.ts";
-import { ensureDir, relativePosix, toPosixPath, uniqueStrings, writeJson, writeText } from "../../core/loop/support.ts";
+import { ensureDir, readJson, relativePosix, toPosixPath, uniqueStrings, writeJson, writeText } from "../../core/loop/support.ts";
 import type {
   AdapterExecutionResult,
   RunEnvelope,
   RunResult,
   RunRole,
   RunTimingMetadata,
+  TaskPacket,
   WorkerOutput,
 } from "../../core/contracts/types.ts";
 import { DockerWorkerLauncher, type DockerWorkerLaunchResult, materializeContainerizedRunEnvelope } from "./docker-runtime.ts";
@@ -69,6 +70,14 @@ const BUILDER_FALLBACK_TEST_RESULT_PATHS = ["evidence/test-results/builder-check
 const BUILDER_FALLBACK_EVIDENCE_PATHS = [
   ...BUILDER_FALLBACK_REPORT_PATHS,
   ...BUILDER_FALLBACK_TEST_RESULT_PATHS,
+];
+const QA_FALLBACK_REPORT_PATHS = ["reports/qa-report.en.md", "reports/fixback-items.en.md"];
+const QA_FALLBACK_TEST_RESULT_PATHS = ["evidence/test-results/qa-check.json"];
+const QA_FALLBACK_METADATA_PATHS = ["metadata/qa-verdict.json"];
+const QA_FALLBACK_EVIDENCE_PATHS = [
+  ...QA_FALLBACK_REPORT_PATHS,
+  ...QA_FALLBACK_TEST_RESULT_PATHS,
+  ...QA_FALLBACK_METADATA_PATHS,
 ];
 
 async function ensureHostWritableRunLayout(runRoot: string): Promise<void> {
@@ -158,6 +167,27 @@ function withBuilderFallbackPaths(workerOutput: WorkerOutput): WorkerOutput {
   };
 }
 
+function qaFallbackItems(workerOutput: WorkerOutput): string[] {
+  if (workerOutput.fixback_items.length > 0) {
+    return workerOutput.fixback_items;
+  }
+  if (workerOutput.blockers.length > 0) {
+    return workerOutput.blockers;
+  }
+  return ["QA did not produce its required outputs."];
+}
+
+function withQaFallbackPaths(workerOutput: WorkerOutput): WorkerOutput {
+  const fixbackItems = qaFallbackItems(workerOutput);
+  return {
+    ...workerOutput,
+    evidence_paths: uniqueStrings([...workerOutput.evidence_paths, ...QA_FALLBACK_EVIDENCE_PATHS]),
+    report_paths: uniqueStrings([...workerOutput.report_paths, ...QA_FALLBACK_REPORT_PATHS]),
+    test_result_paths: uniqueStrings([...workerOutput.test_result_paths, ...QA_FALLBACK_TEST_RESULT_PATHS]),
+    fixback_items: fixbackItems,
+  };
+}
+
 async function writeBuilderFallbackArtifacts(
   runRoot: string,
   envelope: RunEnvelope,
@@ -198,6 +228,54 @@ async function writeBuilderFallbackArtifacts(
     status: workerOutput.status,
     checked_items: [],
     blockers: workerOutput.blockers,
+  });
+}
+
+async function writeQaFallbackArtifacts(
+  runRoot: string,
+  envelope: RunEnvelope,
+  taskPacket: TaskPacket,
+  workerOutput: WorkerOutput,
+): Promise<void> {
+  await writeText(
+    join(runRoot, "reports", "qa-report.en.md"),
+    [
+      "# QA Report",
+      "",
+      `- job_id: ${envelope.job_id}`,
+      `- run_id: ${envelope.run_id}`,
+      `- story_id: ${taskPacket.story.story_id}`,
+      `- QA verdict: ${workerOutput.status}`,
+      "- checked artifacts:",
+      "- none",
+      "",
+      "- missing artifacts:",
+      ...workerOutput.fixback_items.map((value) => `- ${value}`),
+      "",
+    ].join("\n"),
+  );
+  await writeText(
+    join(runRoot, "reports", "fixback-items.en.md"),
+    ["# Fixback Items", "", ...workerOutput.fixback_items.map((value) => `- ${value}`), ""].join("\n"),
+  );
+  await writeJson(join(runRoot, "evidence", "test-results", "qa-check.json"), {
+    run_id: envelope.run_id,
+    run_role: envelope.run_role,
+    story_id: taskPacket.story.story_id,
+    status: workerOutput.status,
+    checked_items: [],
+    blockers: workerOutput.blockers,
+  });
+  await writeJson(join(runRoot, "metadata", "qa-verdict.json"), {
+    story_id: taskPacket.story.story_id,
+    status_family: "run_exit",
+    status: workerOutput.status,
+    acceptance_closure: {
+      pass: 0,
+      fail: 0,
+      blocked: taskPacket.story.acceptance_ids.length,
+      total: taskPacket.story.acceptance_ids.length,
+    },
   });
 }
 
@@ -282,9 +360,16 @@ export class GenericCliAdapter {
       stderr,
     });
     await writeRunTimings(timingsPath, runTimings);
-    if (envelope.run_role === "builder" && usedFallbackWorkerOutput) {
-      workerOutput = withBuilderFallbackPaths(workerOutput);
-      await writeBuilderFallbackArtifacts(runRoot, envelope, workerOutput);
+    if (usedFallbackWorkerOutput) {
+      if (envelope.run_role === "builder") {
+        workerOutput = withBuilderFallbackPaths(workerOutput);
+        await writeBuilderFallbackArtifacts(runRoot, envelope, workerOutput);
+      }
+      if (envelope.run_role === "qa") {
+        workerOutput = withQaFallbackPaths(workerOutput);
+        const taskPacket = await readJson<TaskPacket>(envelope.task_packet_path);
+        await writeQaFallbackArtifacts(runRoot, envelope, taskPacket, workerOutput);
+      }
     }
 
     const runResult: RunResult = {

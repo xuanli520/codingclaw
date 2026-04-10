@@ -156,12 +156,13 @@ export class DockerPathMapper {
 }
 
 export function buildDockerPathMapping(paths: DockerPathMappingRequest): DockerPathMapper {
+  const repoReadOnly = paths.run_role === "builder" ? false : true;
   return new DockerPathMapper([
     {
       name: "repo",
       host_path: paths.repo_path,
       container_path: CONTAINER_PATHS.repo,
-      read_only: true,
+      read_only: repoReadOnly,
     },
     {
       name: "state",
@@ -307,6 +308,30 @@ function dockerUserArgs(): string[] {
     return [];
   }
   return ["--user", `${process.getuid()}:${process.getgid()}`];
+}
+
+function buildRunCommand(dockerExecutable: string, request: DockerWorkerLaunchRequest): string[] {
+  return [
+    dockerExecutable,
+    "run",
+    "--rm",
+    "--network",
+    "none",
+    ...dockerUserArgs(),
+    "--workdir",
+    request.runtime.workdir,
+    "--env",
+    "HOME=/work/runtime-home/home",
+    "--env",
+    "XDG_CACHE_HOME=/work/cache",
+    "--env",
+    "BUN_INSTALL_CACHE_DIR=/work/cache/bun",
+    ...request.runtime.mounts.flatMap((mount) => ["--mount", mountArg(mount)]),
+    request.image,
+    "bun",
+    request.worker_script_path,
+    request.envelope_path,
+  ];
 }
 
 function normalizeImageSignature(value: string): string | null {
@@ -513,38 +538,17 @@ export class DockerWorkerLauncher implements RoleImageResolver {
   }
 
   async launch(request: DockerWorkerLaunchRequest): Promise<DockerWorkerLaunchResult> {
+    const command = buildRunCommand(this.dockerExecutable, request);
     const imagePreparationFailure = await this.ensureRoleImage(request.run_role, request.image);
     if (imagePreparationFailure) {
       return {
-        command: imagePreparationFailure.command,
+        command,
         exitCode: imagePreparationFailure.exitCode,
         stdout: imagePreparationFailure.stdout,
         stderr: imagePreparationFailure.stderr,
         failure_status: "FAILED_INFRA",
       };
     }
-
-    const command = [
-      this.dockerExecutable,
-      "run",
-      "--rm",
-      "--network",
-      "none",
-      ...dockerUserArgs(),
-      "--workdir",
-      request.runtime.workdir,
-      "--env",
-      "HOME=/work/runtime-home/home",
-      "--env",
-      "XDG_CACHE_HOME=/work/cache",
-      "--env",
-      "BUN_INSTALL_CACHE_DIR=/work/cache/bun",
-      ...request.runtime.mounts.flatMap((mount) => ["--mount", mountArg(mount)]),
-      request.image,
-      "bun",
-      request.worker_script_path,
-      request.envelope_path,
-    ];
     const run = await spawnCommand(command, this.repoRoot, resolveTimeoutMs(request.time_limits));
     return {
       command: run.command,
