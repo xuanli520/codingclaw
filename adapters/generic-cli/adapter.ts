@@ -1,7 +1,7 @@
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { buildArtifactIndex } from "../../ops/archive/artifact-index.ts";
 import { writeRunTimings, writeWorkerLog } from "../../ops/archive/run-metadata.ts";
-import { ensureDir, relativePosix, toPosixPath, writeJson, writeText } from "../../core/loop/support.ts";
+import { ensureDir, relativePosix, toPosixPath, uniqueStrings, writeJson, writeText } from "../../core/loop/support.ts";
 import type {
   AdapterExecutionResult,
   RunEnvelope,
@@ -63,6 +63,13 @@ function unexpectedLaunchResult(error: unknown): DockerWorkerLaunchResult {
     failure_status: "FAILED_INFRA",
   };
 }
+
+const BUILDER_FALLBACK_REPORT_PATHS = ["reports/implementation-summary.en.md", "reports/self-check.en.md"];
+const BUILDER_FALLBACK_TEST_RESULT_PATHS = ["evidence/test-results/builder-check.json"];
+const BUILDER_FALLBACK_EVIDENCE_PATHS = [
+  ...BUILDER_FALLBACK_REPORT_PATHS,
+  ...BUILDER_FALLBACK_TEST_RESULT_PATHS,
+];
 
 async function ensureHostWritableRunLayout(runRoot: string): Promise<void> {
   await ensureDir(join(runRoot, "logs"));
@@ -142,6 +149,58 @@ function renderHandoff(
   ].join("\n");
 }
 
+function withBuilderFallbackPaths(workerOutput: WorkerOutput): WorkerOutput {
+  return {
+    ...workerOutput,
+    evidence_paths: uniqueStrings([...workerOutput.evidence_paths, ...BUILDER_FALLBACK_EVIDENCE_PATHS]),
+    report_paths: uniqueStrings([...workerOutput.report_paths, ...BUILDER_FALLBACK_REPORT_PATHS]),
+    test_result_paths: uniqueStrings([...workerOutput.test_result_paths, ...BUILDER_FALLBACK_TEST_RESULT_PATHS]),
+  };
+}
+
+async function writeBuilderFallbackArtifacts(
+  runRoot: string,
+  envelope: RunEnvelope,
+  workerOutput: WorkerOutput,
+): Promise<void> {
+  await writeText(
+    join(runRoot, "reports", "implementation-summary.en.md"),
+    [
+      "# Implementation Summary",
+      "",
+      `- job_id: ${envelope.job_id}`,
+      `- run_id: ${envelope.run_id}`,
+      `- story_id: ${envelope.story_id}`,
+      `- status: ${workerOutput.status}`,
+      "- completed work:",
+      "- worker execution did not produce the builder implementation bundle",
+      "- adapter synthesized the required builder reports for archival completeness",
+      "",
+    ].join("\n"),
+  );
+  await writeText(
+    join(runRoot, "reports", "self-check.en.md"),
+    [
+      "# Self Check",
+      "",
+      "- required checks executed:",
+      "- scope-compliance: blocked",
+      "- artifact-presence: failed",
+      "- evidence-completeness: failed",
+      `- next required action: ${workerOutput.next_action}`,
+      "",
+    ].join("\n"),
+  );
+  await writeJson(join(runRoot, "evidence", "test-results", "builder-check.json"), {
+    run_id: envelope.run_id,
+    run_role: envelope.run_role,
+    story_id: envelope.story_id,
+    status: workerOutput.status,
+    checked_items: [],
+    blockers: workerOutput.blockers,
+  });
+}
+
 export class GenericCliAdapter {
   private readonly dockerLauncher: DockerWorkerLauncher;
 
@@ -184,14 +243,17 @@ export class GenericCliAdapter {
     const endedAtDate = new Date();
 
     let workerOutput: WorkerOutput;
+    let usedFallbackWorkerOutput = false;
     if (exitCode === 0) {
       try {
         workerOutput = JSON.parse(stdout) as WorkerOutput;
       } catch {
         workerOutput = fallbackWorkerOutput("worker output was not valid JSON");
+        usedFallbackWorkerOutput = true;
       }
     } else {
       workerOutput = fallbackWorkerOutput(launchFailureText(launchResult), launchResult.failure_status ?? "FAILED_EXECUTION");
+      usedFallbackWorkerOutput = true;
     }
 
     const durationMs = Math.max(0, endedAtDate.getTime() - startedAtDate.getTime());
@@ -220,6 +282,10 @@ export class GenericCliAdapter {
       stderr,
     });
     await writeRunTimings(timingsPath, runTimings);
+    if (envelope.run_role === "builder" && usedFallbackWorkerOutput) {
+      workerOutput = withBuilderFallbackPaths(workerOutput);
+      await writeBuilderFallbackArtifacts(runRoot, envelope, workerOutput);
+    }
 
     const runResult: RunResult = {
       run_id: envelope.run_id,

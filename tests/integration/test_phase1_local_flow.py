@@ -117,6 +117,21 @@ def write_fake_docker(tmp_path: Path) -> Path:
                 path.write_text(json.dumps(value, indent=2) + "\\n", encoding="utf-8")
 
 
+            def maybe_capture(envelope: dict, task_packet: dict, mounts: list[dict[str, str]]) -> None:
+                capture_dir = os.environ.get("CODINGCLAW_FAKE_DOCKER_CAPTURE_DIR", "").strip()
+                if not capture_dir:
+                    return
+                capture_path = Path(capture_dir) / f"{envelope['run_role']}-{envelope['run_id']}.json"
+                write_json(
+                    capture_path,
+                    {
+                        "envelope": envelope,
+                        "task_packet": task_packet,
+                        "mounts": mounts,
+                    },
+                )
+
+
             def task_packet_for(envelope: dict, mounts: list[dict[str, str]]) -> dict:
                 task_packet_path = map_path(envelope["task_packet_path"], mounts)
                 return load_json(task_packet_path)
@@ -269,6 +284,7 @@ def write_fake_docker(tmp_path: Path) -> Path:
                     qa_status = "FIXBACK_REQUIRED" if mode == "qa_fixback" else "SUCCESS"
                     output = create_qa_outputs(envelope, task_packet, artifact_root, qa_status)
 
+                maybe_capture(envelope, task_packet, mounts)
                 sys.stdout.write(json.dumps(output))
                 return 0
 
@@ -291,6 +307,28 @@ def write_time_limit_minutes(repo_root: Path, minutes: float) -> None:
         fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
         fixture["time_limits"]["minutes"] = minutes
         fixture_path.write_text(json.dumps(fixture, indent=2) + "\n", encoding="utf-8")
+
+
+def load_capture(capture_dir: Path, run_role: str) -> dict:
+    matches = sorted(capture_dir.glob(f"{run_role}-*.json"))
+    assert matches
+    return json.loads(matches[0].read_text(encoding="utf-8"))
+
+
+def assert_builder_failure_bundle(job_root: Path) -> None:
+    run_roots = sorted(path for path in (job_root / "artifacts" / "runs").iterdir() if path.is_dir())
+    assert len(run_roots) == 1
+    builder_run_root = run_roots[0]
+    artifact_index = json.loads((builder_run_root / "metadata" / "artifact-index.json").read_text(encoding="utf-8"))
+    indexed_paths = {entry["path"] for entry in artifact_index["artifacts"]}
+
+    for relative_path in [
+        "reports/implementation-summary.en.md",
+        "reports/self-check.en.md",
+        "evidence/test-results/builder-check.json",
+    ]:
+        assert (builder_run_root / relative_path).exists()
+        assert relative_path in indexed_paths
 
 
 @pytest.mark.integration
@@ -333,6 +371,40 @@ def test_phase1_local_freeze_digest_captures_repo_dependency_inputs(tmp_path):
 
 @pytest.mark.integration
 @pytest.mark.skipif(shutil.which("bun") is None, reason="bun is required")
+def test_phase1_local_builder_container_materialization_uses_read_only_inputs_and_container_paths(tmp_path):
+    repo_root = export_repo(tmp_path)
+    fake_docker = write_fake_docker(tmp_path)
+    capture_dir = tmp_path / "captures"
+    result = run_phase1(
+        repo_root,
+        {
+            "CODINGCLAW_DOCKER_BIN": str(fake_docker),
+            "CODINGCLAW_FAKE_DOCKER_CAPTURE_DIR": str(capture_dir),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
+
+    builder_capture = load_capture(capture_dir, "builder")
+    builder_task_packet = builder_capture["task_packet"]
+    builder_envelope = builder_capture["envelope"]
+    mounts = {mount["target"]: mount for mount in builder_capture["mounts"]}
+
+    assert builder_task_packet["repo_path"] == "/work/repo"
+    assert builder_task_packet["state_path"] == "/work/state"
+    assert builder_task_packet["runtime_home"] == "/work/runtime-home"
+    assert builder_task_packet["artifact_path"] == builder_envelope["artifact_path"]
+    assert builder_task_packet["artifact_path"].endswith(f"/artifacts/runs/{builder_envelope['run_id']}")
+    assert str(repo_root) not in json.dumps(builder_task_packet, ensure_ascii=False)
+
+    assert mounts["/work/repo"]["readonly"] == "true"
+    assert mounts["/work/state"]["readonly"] == "true"
+    assert mounts["/work/artifacts"]["readonly"] == "true"
+    assert mounts[builder_envelope["artifact_path"]].get("readonly") != "true"
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(shutil.which("bun") is None, reason="bun is required")
 def test_phase1_local_builder_failed_infra_stops_before_qa(tmp_path):
     repo_root = export_repo(tmp_path)
     result = run_phase1(repo_root, {"CODINGCLAW_DOCKER_BIN": "does-not-exist"})
@@ -353,6 +425,7 @@ def test_phase1_local_builder_failed_infra_stops_before_qa(tmp_path):
     assert archived_trace["stories"]["STORY-PHASE1-LOCAL-001"]["latest_qa_status"] == "PENDING"
     assert live_trace == archived_trace
     assert not (job_root / "artifacts" / "final" / "final-summary.en.md").exists()
+    assert_builder_failure_bundle(job_root)
 
 
 @pytest.mark.integration
@@ -415,3 +488,4 @@ def test_phase1_local_builder_timeout_stops_before_qa(tmp_path):
     assert archived_trace["stories"]["STORY-PHASE1-LOCAL-001"]["latest_run_role"] == "builder"
     assert archived_trace["stories"]["STORY-PHASE1-LOCAL-001"]["latest_qa_status"] == "PENDING"
     assert not (job_root / "artifacts" / "final" / "final-summary.en.md").exists()
+    assert_builder_failure_bundle(job_root)

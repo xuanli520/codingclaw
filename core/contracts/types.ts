@@ -82,7 +82,7 @@ export interface TaskPacket {
   story: StoryContract;
 }
 
-export type ContainerMountName = "repo" | "state" | "artifacts" | "runtime-home" | "cache";
+export type ContainerMountName = "repo" | "state" | "artifacts" | "run-artifacts" | "runtime-home" | "cache";
 
 export interface ContainerPathMount {
   name: ContainerMountName;
