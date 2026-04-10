@@ -56,6 +56,7 @@ export interface DockerWorkerLaunchRequest {
   worker_script_path: string;
   envelope_path: string;
   runtime: ContainerRuntimeConfig;
+  time_limits: Record<string, unknown>;
 }
 
 export interface DockerWorkerLaunchResult {
@@ -72,6 +73,7 @@ interface CommandExecutionResult {
   stdout: string;
   stderr: string;
   spawn_error: string | null;
+  timed_out: boolean;
 }
 
 interface DockerMappedPaths {
@@ -297,7 +299,36 @@ async function buildImageSignature(
   );
 }
 
-async function spawnCommand(command: string[], cwd: string): Promise<CommandExecutionResult> {
+function readNumericLimit(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "string" && value.trim().length > 0) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+  return null;
+}
+
+function resolveTimeoutMs(timeLimits: Record<string, unknown>): number | null {
+  const milliseconds = readNumericLimit(timeLimits.milliseconds ?? timeLimits.ms);
+  if (milliseconds !== null) {
+    return Math.max(0, Math.round(milliseconds));
+  }
+  const seconds = readNumericLimit(timeLimits.seconds);
+  if (seconds !== null) {
+    return Math.max(0, Math.round(seconds * 1000));
+  }
+  const minutes = readNumericLimit(timeLimits.minutes);
+  if (minutes !== null) {
+    return Math.max(0, Math.round(minutes * 60_000));
+  }
+  return null;
+}
+
+async function spawnCommand(command: string[], cwd: string, timeoutMs: number | null = null): Promise<CommandExecutionResult> {
   try {
     const handle = Bun.spawn({
       cmd: command,
@@ -307,13 +338,25 @@ async function spawnCommand(command: string[], cwd: string): Promise<CommandExec
     });
     const stdoutPromise = new Response(handle.stdout).text();
     const stderrPromise = new Response(handle.stderr).text();
+    let timedOut = false;
+    const timeoutHandle =
+      timeoutMs === null
+        ? null
+        : setTimeout(() => {
+            timedOut = true;
+            handle.kill();
+          }, timeoutMs);
     const exitCode = await handle.exited;
+    if (timeoutHandle !== null) {
+      clearTimeout(timeoutHandle);
+    }
     return {
       command,
       exitCode,
       stdout: await stdoutPromise,
       stderr: await stderrPromise,
       spawn_error: null,
+      timed_out: timedOut,
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -323,11 +366,15 @@ async function spawnCommand(command: string[], cwd: string): Promise<CommandExec
       stdout: "",
       stderr: message,
       spawn_error: message,
+      timed_out: false,
     };
   }
 }
 
 function classifyRunFailure(result: CommandExecutionResult): RunExitStatus | null {
+  if (result.timed_out) {
+    return "TIMEOUT";
+  }
   if (result.exitCode === 0) {
     return null;
   }
@@ -465,7 +512,7 @@ export class DockerWorkerLauncher implements RoleImageResolver {
       request.worker_script_path,
       request.envelope_path,
     ];
-    const run = await spawnCommand(command, this.repoRoot);
+    const run = await spawnCommand(command, this.repoRoot, resolveTimeoutMs(request.time_limits));
     return {
       command: run.command,
       exitCode: run.exitCode,

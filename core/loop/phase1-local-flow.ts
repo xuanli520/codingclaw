@@ -1,6 +1,5 @@
 import { join } from "node:path";
 import { GenericCliAdapter } from "../../adapters/generic-cli/adapter.ts";
-import { containerizeTaskPacket } from "../../adapters/generic-cli/docker-runtime.ts";
 import { writeApprovalArchive } from "../../ops/archive/approvals.ts";
 import {
   buildEnvironmentSnapshotMetadata,
@@ -163,6 +162,7 @@ async function buildTaskPacket(
   artifactRoot: string,
   runtimeHome: string,
   previousHandoffPath: string,
+  persist = true,
 ): Promise<TaskPacket> {
   const taskPacketPath = join(artifactRoot, "metadata", "task-packet.en.json");
   const { expectedArtifacts, verificationTargets } = roleArtifacts(runRole);
@@ -186,18 +186,14 @@ async function buildTaskPacket(
     },
   );
 
-  await ensureDir(join(artifactRoot, "metadata"));
-  const containerizedPacket = containerizeTaskPacket(packetWithoutChecksum, {
-    repo_path: repoRoot,
-    state_path: stateRoot,
-    artifact_path: artifactRoot,
-    runtime_home: runtimeHome,
-  });
   const finalPacket: TaskPacket = {
-    ...containerizedPacket,
-    task_packet_sha256: taskPacketDigest(containerizedPacket),
+    ...packetWithoutChecksum,
+    task_packet_sha256: taskPacketDigest(packetWithoutChecksum),
   };
-  await writeJson(taskPacketPath, finalPacket);
+  if (persist) {
+    await ensureDir(join(artifactRoot, "metadata"));
+    await writeJson(taskPacketPath, finalPacket);
+  }
 
   return finalPacket;
 }
@@ -237,6 +233,8 @@ async function buildRunEnvelope(
 
   return {
     ...envelope,
+    budget_limits: taskPacket.budget_limits,
+    time_limits: taskPacket.time_limits,
     requested_capabilities: taskPacket.requested_capabilities,
     container_runtime: null,
   };
@@ -560,9 +558,9 @@ export interface Phase1RunSummary {
   job_id: string;
   job_root: string;
   builder_run_id: string;
-  qa_run_id: string;
+  qa_run_id: string | null;
   builder_status: string;
-  qa_status: string;
+  qa_status: string | null;
   manifest_path: string;
   checksums_path: string;
 }
@@ -595,7 +593,7 @@ export async function runPhase1Local(repoRoot: string): Promise<Phase1RunSummary
     layout.runtimeHomeRoot,
     builderPreviousHandoffPath,
   );
-  const qaTaskPacket = await buildTaskPacket(
+  const qaTaskPacketPreview = await buildTaskPacket(
     repoRoot,
     "qa",
     qaRunId,
@@ -603,12 +601,13 @@ export async function runPhase1Local(repoRoot: string): Promise<Phase1RunSummary
     qaRunRoot,
     layout.runtimeHomeRoot,
     qaPreviousHandoffPath,
+    false,
   );
 
   const approvalRecord = await writeApprovalArchive(layout.approvalRoot(approvalCard.card_id), approvalCard, decision);
   const allExpectedArtifacts = uniqueStrings([
     ...builderTaskPacket.story.expected_artifacts,
-    ...qaTaskPacket.story.expected_artifacts,
+    ...qaTaskPacketPreview.story.expected_artifacts,
     "artifacts/final/final-summary.en.md",
     "artifacts/metadata/environment.json",
   ]);
@@ -656,7 +655,7 @@ export async function runPhase1Local(repoRoot: string): Promise<Phase1RunSummary
       dependencySnapshotDigest,
       adapterInfo,
       builderTaskPacket,
-      qaTaskPacket,
+      qaTaskPacketPreview,
       decision.decided_at,
     ),
     approvalSnapshotPath: layout.relativeToJobRoot(approvalRecord.snapshot_path),
@@ -715,57 +714,73 @@ export async function runPhase1Local(repoRoot: string): Promise<Phase1RunSummary
   );
   await writeJobManifest(layout.manifestPath, builderManifest);
 
-  await stateStore.prepareRun(qaTaskPacket);
-  const qaEnvelope = await buildRunEnvelope(
-    repoRoot,
-    qaTaskPacket,
-    layout.archiveStateRoot,
-    qaRunRoot,
-    layout.runtimeHomeRoot,
-    qaPreviousHandoffPath,
-    approvalRecord.snapshot_path,
-    {
-      trace_index_path: stateStore.getTraceIndexPath(),
-      builder_run_root: builderExecution.runRoot,
-      builder_run_result_path: builderExecution.runResultPath,
-      builder_artifact_index_path: builderExecution.artifactIndexPath,
-    },
-  );
-  const qaExecution = await normalizeRunArtifacts(layout, await adapter.execute(qaEnvelope));
-  executions.push(qaExecution);
-  await stateStore.recordRun(qaTaskPacket, qaExecution);
-
-  const finalManifest = buildJobManifest(
-    layout,
-    qaTaskPacket,
-    baseBranch,
-    planRecord,
-    freezeRecord,
-    approvalRecord,
-    executions,
-    adapterInfo.adapter_id,
-  );
-  await writeJobManifest(layout.manifestPath, finalManifest);
-
-  let manifestForChecksums = finalManifest;
+  let qaTaskPacket: TaskPacket | null = null;
+  let qaExecution: AdapterExecutionResult | null = null;
+  let manifestForChecksums = builderManifest;
+  let latestTaskPacketForIntegrity = builderTaskPacket;
   const extraChecksumPaths: string[] = [];
-  if (qaExecution.runResult.status === "SUCCESS") {
-    const completedAt = nowIso();
-    const finalization = await finalizeArchive({
-      layout,
-      manifest: finalManifest,
-      environment: buildEnvironmentSnapshotMetadata(layout, finalManifest),
-      finalSummary: buildFinalSummaryMetadata(layout, qaTaskPacket, finalManifest, executions, completedAt),
-    });
-    manifestForChecksums = finalization.manifest;
-    extraChecksumPaths.push(finalization.environment_path, finalization.final_summary_path);
-    await writeJobManifest(layout.manifestPath, manifestForChecksums);
-    await stateStore.recordArchiveFinalization(
-      qaTaskPacket,
-      qaExecution.runResult.run_id,
-      qaExecution.runResult.run_role,
-      finalization.final_summary_path,
+  if (builderExecution.runResult.status === "SUCCESS") {
+    qaTaskPacket = await buildTaskPacket(
+      repoRoot,
+      "qa",
+      qaRunId,
+      layout.archiveStateRoot,
+      qaRunRoot,
+      layout.runtimeHomeRoot,
+      qaPreviousHandoffPath,
     );
+    latestTaskPacketForIntegrity = qaTaskPacket;
+    await stateStore.prepareRun(qaTaskPacket);
+    const qaEnvelope = await buildRunEnvelope(
+      repoRoot,
+      qaTaskPacket,
+      layout.archiveStateRoot,
+      qaRunRoot,
+      layout.runtimeHomeRoot,
+      qaPreviousHandoffPath,
+      approvalRecord.snapshot_path,
+      {
+        trace_index_path: stateStore.getTraceIndexPath(),
+        builder_run_root: builderExecution.runRoot,
+        builder_run_result_path: builderExecution.runResultPath,
+        builder_artifact_index_path: builderExecution.artifactIndexPath,
+      },
+    );
+    qaExecution = await normalizeRunArtifacts(layout, await adapter.execute(qaEnvelope));
+    executions.push(qaExecution);
+    await stateStore.recordRun(qaTaskPacket, qaExecution);
+
+    const finalManifest = buildJobManifest(
+      layout,
+      qaTaskPacket,
+      baseBranch,
+      planRecord,
+      freezeRecord,
+      approvalRecord,
+      executions,
+      adapterInfo.adapter_id,
+    );
+    manifestForChecksums = finalManifest;
+    await writeJobManifest(layout.manifestPath, finalManifest);
+
+    if (qaExecution.runResult.status === "SUCCESS") {
+      const completedAt = nowIso();
+      const finalization = await finalizeArchive({
+        layout,
+        manifest: finalManifest,
+        environment: buildEnvironmentSnapshotMetadata(layout, finalManifest),
+        finalSummary: buildFinalSummaryMetadata(layout, qaTaskPacket, finalManifest, executions, completedAt),
+      });
+      manifestForChecksums = finalization.manifest;
+      extraChecksumPaths.push(finalization.environment_path, finalization.final_summary_path);
+      await writeJobManifest(layout.manifestPath, manifestForChecksums);
+      await stateStore.recordArchiveFinalization(
+        qaTaskPacket,
+        qaExecution.runResult.run_id,
+        qaExecution.runResult.run_role,
+        finalization.final_summary_path,
+      );
+    }
   }
 
   const checksumRecords = await buildChecksumRecords(
@@ -784,7 +799,7 @@ export async function runPhase1Local(repoRoot: string): Promise<Phase1RunSummary
       layout,
       stateStore,
       manifestForChecksums,
-      qaTaskPacket,
+      latestTaskPacketForIntegrity,
       formatChecksumVerificationFailure("freeze checksum verification failed", freezeVerification),
     );
   }
@@ -795,7 +810,7 @@ export async function runPhase1Local(repoRoot: string): Promise<Phase1RunSummary
       layout,
       stateStore,
       manifestForChecksums,
-      qaTaskPacket,
+      latestTaskPacketForIntegrity,
       formatChecksumVerificationFailure("job checksum verification failed", checksumVerification),
     );
   }
@@ -804,9 +819,9 @@ export async function runPhase1Local(repoRoot: string): Promise<Phase1RunSummary
     job_id: builderTaskPacket.job_id,
     job_root: layout.jobRoot,
     builder_run_id: builderExecution.runResult.run_id,
-    qa_run_id: qaExecution.runResult.run_id,
+    qa_run_id: qaExecution?.runResult.run_id ?? null,
     builder_status: builderExecution.runResult.status,
-    qa_status: qaExecution.runResult.status,
+    qa_status: qaExecution?.runResult.status ?? null,
     manifest_path: layout.manifestPath,
     checksums_path: layout.checksumsPath,
   };

@@ -173,6 +173,7 @@ export class GenericCliAdapter {
         worker_script_path: workerScript,
         envelope_path: materialization.runtime.envelope_container_path,
         runtime: materialization.runtime,
+        time_limits: envelope.time_limits,
       });
     } catch (error) {
       launchResult = unexpectedLaunchResult(error);
