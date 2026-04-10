@@ -15,6 +15,9 @@ export interface ApprovalArchiveRecord {
   decision: string | null;
   decided_at: string | null;
   timeout_at: string;
+  waiting_on: "owner" | "takeover" | null;
+  resume_action: string | null;
+  paused_run_id: string | null;
 }
 
 function renderApprovalSummary(card: ApprovalCardSnapshot, decision: ApprovalDecisionReceipt | null): string {
@@ -80,5 +83,8 @@ export async function writeApprovalArchive(
     decision: decision?.decision ?? null,
     decided_at: decision?.decided_at ?? null,
     timeout_at: card.timeout_at,
+    waiting_on: card.recovery_context?.resume_gate ?? null,
+    resume_action: card.recovery_context === null || card.recovery_context === undefined ? null : card.requested_action,
+    paused_run_id: card.recovery_context?.paused_run_id ?? null,
   };
 }

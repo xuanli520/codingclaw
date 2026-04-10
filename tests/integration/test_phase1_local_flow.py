@@ -391,6 +391,18 @@ def assert_recovery_pause_context(manifest: dict, job_root: Path, expected_statu
     assert recovery_card["recovery_context"]["resume_gate"] == "owner"
 
 
+def assert_recovery_state_mirror(job_root: Path, recovery_card_id: str) -> None:
+    decisions = (job_root / "state" / "decisions.en.md").read_text(encoding="utf-8")
+    progress = (job_root / "state" / "progress.en.md").read_text(encoding="utf-8")
+    risk_register = (job_root / "state" / "risk-register.en.md").read_text(encoding="utf-8")
+
+    assert f"- card_id: {recovery_card_id}" in decisions
+    assert "Wait for owner input before continuing." in decisions
+    assert "Wait for owner input before continuing." in progress
+    assert "fixback" not in risk_register.lower()
+    assert "owner review is required" in risk_register.lower()
+
+
 @pytest.mark.integration
 @pytest.mark.skipif(shutil.which("bun") is None, reason="bun is required")
 def test_phase1_local_rerun_rejects_mutating_existing_archive(tmp_path):
@@ -448,14 +460,21 @@ def test_phase1_local_builder_container_materialization_uses_read_only_inputs_an
     builder_capture = load_capture(capture_dir, "builder")
     builder_task_packet = builder_capture["task_packet"]
     builder_envelope = builder_capture["envelope"]
+    container_paths = builder_envelope["container_runtime"]["container_paths"]
     mounts = {mount["target"]: mount for mount in builder_capture["mounts"]}
+    job_root = repo_root / "jobs" / "job-phase1-local"
 
-    assert builder_task_packet["repo_path"] == "/work/repo"
-    assert builder_task_packet["state_path"] == "/work/state"
-    assert builder_task_packet["runtime_home"] == "/work/runtime-home"
-    assert builder_task_packet["artifact_path"] == builder_envelope["artifact_path"]
-    assert builder_task_packet["artifact_path"].endswith(f"/artifacts/runs/{builder_envelope['run_id']}")
-    assert str(repo_root) not in json.dumps(builder_task_packet, ensure_ascii=False)
+    assert builder_task_packet["repo_path"] == repo_root.as_posix()
+    assert builder_task_packet["state_path"] == (job_root / "state").as_posix()
+    assert builder_task_packet["runtime_home"] == (job_root / "runtime-home" / "phase1-local").as_posix()
+    assert builder_task_packet["artifact_path"] == (job_root / "artifacts" / "runs" / builder_envelope["run_id"]).as_posix()
+    assert "container_control" not in builder_task_packet["requested_capabilities"]
+    assert container_paths["repo_path"] == "/work/repo"
+    assert container_paths["state_path"] == "/work/state"
+    assert container_paths["runtime_home"] == "/work/runtime-home"
+    assert container_paths["artifact_path"] == builder_envelope["artifact_path"]
+    assert container_paths["task_packet_path"] == builder_envelope["task_packet_path"]
+    assert builder_envelope["task_packet_path"].endswith(f"/artifacts/runs/{builder_envelope['run_id']}/metadata/task-packet.en.json")
 
     capability_manifest = json.loads(
         (repo_root / "adapters" / "generic-cli" / "adapter-capability.json").read_text(encoding="utf-8")
@@ -469,15 +488,14 @@ def test_phase1_local_builder_container_materialization_uses_read_only_inputs_an
     assert mounts["/work/runtime-home"].get("readonly") != "true"
     assert filesystem_write_scope == {"repo", "run-artifacts", "runtime-home"}
 
-    job_root = repo_root / "jobs" / "job-phase1-local"
     manifest = json.loads((job_root / "job-manifest.json").read_text(encoding="utf-8"))
     freeze = json.loads((job_root / "contract-freeze.json").read_text(encoding="utf-8"))
     builder_run = next(run for run in manifest["runs"] if run["run_role"] == "builder")
     expected_task_packet_path = builder_run["task_packet_path"]
 
-    assert expected_task_packet_path.endswith(f"/envelopes/container/task-packets/{builder_envelope['run_id']}.json")
-    assert builder_run["task_packet_path"] != f"artifacts/runs/{builder_envelope['run_id']}/metadata/task-packet.en.json"
+    assert expected_task_packet_path == f"artifacts/runs/{builder_envelope['run_id']}/metadata/task-packet.en.json"
     assert json.loads((job_root / expected_task_packet_path).read_text(encoding="utf-8")) == builder_task_packet
+    assert not (job_root / "runtime-home" / "phase1-local" / "envelopes" / "container" / "task-packets").exists()
     assert expected_task_packet_path in (job_root / "checksums.txt").read_text(encoding="utf-8")
     assert freeze["task_packet_digests"][builder_envelope["run_id"]] == builder_task_packet["task_packet_sha256"]
 
@@ -544,6 +562,7 @@ def test_phase1_local_builder_failed_infra_stops_before_qa(tmp_path):
     assert not (job_root / "artifacts" / "final" / "final-summary.en.md").exists()
     assert_builder_failure_bundle(job_root)
     assert_recovery_pause_context(manifest, job_root, "FAILED_INFRA")
+    assert_recovery_state_mirror(job_root, manifest["pause_context"]["related_card_id"])
 
 
 @pytest.mark.integration
@@ -643,6 +662,7 @@ def test_phase1_local_qa_non_success_writes_required_qa_bundle(tmp_path, mode, e
     qa_verdict = json.loads((qa_run_root / "metadata" / "qa-verdict.json").read_text(encoding="utf-8"))
     assert qa_verdict["status"] == expected_status
     assert_recovery_pause_context(manifest, job_root, expected_status)
+    assert_recovery_state_mirror(job_root, manifest["pause_context"]["related_card_id"])
 
 
 @pytest.mark.integration

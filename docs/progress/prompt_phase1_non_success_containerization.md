@@ -1,5 +1,12 @@
 You are implementing one bounded Phase 1 task for CodingClaw.
 
+Current behavior
+- Dockerized Phase 1 now keeps exactly one task packet per run at `artifacts/runs/<run_id>/metadata/task-packet.en.json`.
+- Container execution reads that canonical packet through the mapped `RunEnvelope.task_packet_path`; path translation lives in `RunEnvelope.container_runtime.container_paths`.
+- `runtime-home/.../envelopes/container/task-packets/` transport copies are no longer generated, and the task packet is no longer rewritten with containerized paths or injected `container_control`.
+- `contract-freeze.json.task_packet_digests`, `job-manifest.json.runs[].task_packet_path`, and `checksums.txt` bind only the canonical run-root packet.
+- Builder or QA non-success exits still stop the loop before unsupported downstream work, archive the required run bundle, and skip `artifacts/final/final-summary.en.md` unless QA reaches `SUCCESS`.
+
 Read these documents first:
 - docs/SYSTEM_BLUEPRINT.md
 - docs/ARCHITECTURE_OVERVIEW.md

@@ -1,5 +1,12 @@
 You are implementing one bounded Phase 1 task for CodingClaw.
 
+Current behavior
+- Recovery cards are archived under `approvals/<card_id>/` before archived `state/` and mirrored `state/` files are updated.
+- Pending recovery archive records now expose `waiting_on`, `resume_action`, and `paused_run_id` so loop state can consume them directly.
+- `job-manifest.json.pause_context` is populated from the archived recovery card when the latest run leaves the job in `AWAITING_OWNER` or `AWAITING_TAKEOVER`.
+- `state/decisions.en.md`, `state/progress.en.md`, and `state/risk-register.en.md` now mirror the recovery gate with the archived `card_id` and waiting target instead of reusing fixback wording.
+- Waiting-owner states describe owner recovery review, and waiting-takeover states describe takeover gating.
+
 Read these documents first:
 - docs/SYSTEM_BLUEPRINT.md
 - docs/ARCHITECTURE_OVERVIEW.md

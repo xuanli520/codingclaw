@@ -397,7 +397,7 @@ export class GenericCliAdapter {
       artifactIndex,
       workerOutput,
       runRoot,
-      taskPacketPath: materialization.host_task_packet_path,
+      taskPacketPath: materialization.canonical_task_packet_path,
       runResultPath,
       artifactIndexPath,
       commandLogPath,

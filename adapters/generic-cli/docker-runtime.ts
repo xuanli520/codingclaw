@@ -1,5 +1,5 @@
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
-import { ensureDir, readJson, readText, sha256Text, toPosixPath, uniqueStrings, writeJson } from "../../core/loop/support.ts";
+import { ensureDir, readText, sha256Text, toPosixPath, writeJson } from "../../core/loop/support.ts";
 import type {
   ContainerPathMap,
   ContainerPathMount,
@@ -7,7 +7,6 @@ import type {
   RunEnvelope,
   RunExitStatus,
   RunRole,
-  TaskPacket,
 } from "../../core/contracts/types.ts";
 
 export const CONTAINER_PATHS = {
@@ -48,7 +47,7 @@ export interface ContainerizedRunEnvelopeMaterialization {
   runtime: ContainerRuntimeConfig;
   host_envelope_path: string;
   container_envelope_path: string;
-  host_task_packet_path: string;
+  canonical_task_packet_path: string;
 }
 
 export interface DockerWorkerLaunchRequest {
@@ -98,10 +97,6 @@ function artifactRootFromRunRoot(runRoot: string): string {
 
 function runRootContainerPath(runRoot: string): string {
   return `${CONTAINER_PATHS.artifacts}/runs/${basename(normalizeHostPath(runRoot))}`;
-}
-
-function taskPacketDigest(taskPacket: TaskPacket): string {
-  return sha256Text(`${JSON.stringify({ ...taskPacket, task_packet_sha256: "" }, null, 2)}\n`);
 }
 
 export function resolveDockerWorkerImage(runRole: RunRole): string {
@@ -198,23 +193,6 @@ export function buildDockerPathMapping(paths: DockerPathMappingRequest): DockerP
   ]);
 }
 
-export function containerizeTaskPacket(taskPacket: TaskPacket, paths: DockerMappedPaths): TaskPacket {
-  const mapper = buildDockerPathMapping(paths);
-  const mappedTaskPacket: TaskPacket = {
-    ...taskPacket,
-    repo_path: mapper.mapPath(taskPacket.repo_path),
-    state_path: mapper.mapPath(taskPacket.state_path),
-    artifact_path: mapper.mapPath(taskPacket.artifact_path),
-    runtime_home: mapper.mapPath(taskPacket.runtime_home),
-    previous_handoff_path: mapper.mapPath(taskPacket.previous_handoff_path),
-    requested_capabilities: uniqueStrings([...taskPacket.requested_capabilities, "container_control"]),
-  };
-  return {
-    ...mappedTaskPacket,
-    task_packet_sha256: taskPacketDigest(mappedTaskPacket),
-  };
-}
-
 function buildContainerPathMap(envelope: RunEnvelope, mapper: DockerPathMapper): ContainerPathMap {
   return {
     repo_path: mapper.mapPath(envelope.repo_path),
@@ -233,17 +211,8 @@ export async function materializeContainerizedRunEnvelope(
 ): Promise<ContainerizedRunEnvelopeMaterialization> {
   const hostEnvelopePath = join(envelope.runtime_home, "envelopes", `${envelope.run_id}.json`);
   const containerEnvelopePath = join(envelope.runtime_home, "envelopes", "container", `${envelope.run_id}.json`);
-  const hostContainerTaskPacketPath = join(
-    envelope.runtime_home,
-    "envelopes",
-    "container",
-    "task-packets",
-    `${envelope.run_id}.json`,
-  );
   const cacheHostPath = join(envelope.runtime_home, "cache");
   const mapper = buildDockerPathMapping(envelope);
-  const containerTaskPacket = containerizeTaskPacket(await readJson<TaskPacket>(envelope.task_packet_path), envelope);
-  const containerTaskPacketPath = mapper.mapPath(hostContainerTaskPacketPath);
   const runtime: ContainerRuntimeConfig = {
     runtime: "docker",
     image: resolveDockerWorkerImage(envelope.run_role),
@@ -251,15 +220,10 @@ export async function materializeContainerizedRunEnvelope(
     envelope_host_path: hostEnvelopePath,
     envelope_container_path: mapper.mapPath(containerEnvelopePath),
     mounts: mapper.mounts,
-    container_paths: {
-      ...buildContainerPathMap(envelope, mapper),
-      task_packet_path: containerTaskPacketPath,
-    },
+    container_paths: buildContainerPathMap(envelope, mapper),
   };
-  const requestedCapabilities = uniqueStrings([...envelope.requested_capabilities, "container_control"]);
   const hostEnvelope: RunEnvelope = {
     ...envelope,
-    requested_capabilities: requestedCapabilities,
     container_runtime: runtime,
   };
   const containerEnvelope: RunEnvelope = {
@@ -269,7 +233,7 @@ export async function materializeContainerizedRunEnvelope(
     artifact_path: runtime.container_paths.artifact_path,
     runtime_home: runtime.container_paths.runtime_home,
     task_packet_path: runtime.container_paths.task_packet_path,
-    task_packet_sha256: containerTaskPacket.task_packet_sha256,
+    task_packet_sha256: envelope.task_packet_sha256,
     previous_handoff_path: runtime.container_paths.previous_handoff_path,
     approval_snapshot_path: runtime.container_paths.approval_snapshot_path,
     trace_context: runtime.container_paths.trace_context,
@@ -277,11 +241,9 @@ export async function materializeContainerizedRunEnvelope(
 
   await ensureDir(dirname(hostEnvelopePath));
   await ensureDir(dirname(containerEnvelopePath));
-  await ensureDir(dirname(hostContainerTaskPacketPath));
   await ensureDir(cacheHostPath);
   await writeJson(hostEnvelopePath, hostEnvelope);
   await writeJson(containerEnvelopePath, containerEnvelope);
-  await writeJson(hostContainerTaskPacketPath, containerTaskPacket);
 
   return {
     host_envelope: hostEnvelope,
@@ -289,7 +251,7 @@ export async function materializeContainerizedRunEnvelope(
     runtime,
     host_envelope_path: hostEnvelopePath,
     container_envelope_path: containerEnvelopePath,
-    host_task_packet_path: hostContainerTaskPacketPath,
+    canonical_task_packet_path: envelope.task_packet_path,
   };
 }
 

@@ -1,6 +1,5 @@
 import { join } from "node:path";
 import { GenericCliAdapter } from "../../adapters/generic-cli/adapter.ts";
-import { containerizeTaskPacket } from "../../adapters/generic-cli/docker-runtime.ts";
 import { writeApprovalArchive } from "../../ops/archive/approvals.ts";
 import {
   buildEnvironmentSnapshotMetadata,
@@ -203,10 +202,6 @@ async function buildTaskPacket(
 
 function taskPacketDigest(taskPacket: TaskPacket): string {
   return sha256Text(`${JSON.stringify({ ...taskPacket, task_packet_sha256: "" }, null, 2)}\n`);
-}
-
-function executionTaskPacket(taskPacket: TaskPacket): TaskPacket {
-  return containerizeTaskPacket(taskPacket, taskPacket);
 }
 
 async function buildRunEnvelope(
@@ -518,11 +513,24 @@ function buildPauseContext(
   return {
     is_paused: true,
     pause_reason: execution.runResult.status,
-    waiting_on: waitingOn,
-    resume_action: execution.workerOutput.next_action,
+    waiting_on: approvalRecord?.waiting_on ?? waitingOn,
+    resume_action: approvalRecord?.resume_action ?? execution.workerOutput.next_action,
     paused_at: execution.runResult.ended_at,
     related_card_id: approvalRecord?.card_id ?? null,
     expires_at: approvalRecord?.timeout_at ?? null,
+  };
+}
+
+function buildRunRecoveryState(
+  approvalRecord: Awaited<ReturnType<typeof writeApprovalArchive>> | null,
+): { card_id: string; waiting_on: "owner" | "takeover"; resume_action: string } | null {
+  if (approvalRecord === null || approvalRecord.waiting_on === null || approvalRecord.resume_action === null) {
+    return null;
+  }
+  return {
+    card_id: approvalRecord.card_id,
+    waiting_on: approvalRecord.waiting_on,
+    resume_action: approvalRecord.resume_action,
   };
 }
 
@@ -656,10 +664,6 @@ async function buildChecksumRecords(
     for (const file of files) {
       runRelativePaths.push(`${runRootRelative}/${file}`);
     }
-    const taskPacketPath = layout.relativeToJobRoot(execution.taskPacketPath);
-    if (!taskPacketPath.startsWith(`${runRootRelative}/`)) {
-      runRelativePaths.push(taskPacketPath);
-    }
   }
 
   const relativePaths = uniqueStrings([
@@ -782,8 +786,8 @@ export async function runPhase1Local(repoRoot: string): Promise<Phase1RunSummary
       baseBranch,
       dependencySnapshotDigest,
       adapterInfo,
-      executionTaskPacket(builderTaskPacket),
-      executionTaskPacket(qaTaskPacketPreview),
+      builderTaskPacket,
+      qaTaskPacketPreview,
       decision.decided_at,
     ),
     approvalSnapshotPath: layout.relativeToJobRoot(approvalRecord.snapshot_path),
@@ -828,7 +832,14 @@ export async function runPhase1Local(repoRoot: string): Promise<Phase1RunSummary
   );
   const builderExecution = await normalizeRunArtifacts(layout, await adapter.execute(builderEnvelope));
   executions.push(builderExecution);
-  await stateStore.recordRun(builderTaskPacket, builderExecution);
+  let builderRecoveryRecord: Awaited<ReturnType<typeof writeApprovalArchive>> | null = null;
+  const builderJobState = mapRunExitToJobState(builderExecution.runResult.status, builderExecution.runResult.run_role);
+  if (builderJobState === "AWAITING_OWNER" || builderJobState === "AWAITING_TAKEOVER") {
+    const recoveryCard = buildRecoveryCard(builderTaskPacket, builderExecution);
+    builderRecoveryRecord = await writeApprovalArchive(layout.approvalRoot(recoveryCard.card_id), recoveryCard, null);
+    approvalRecords.push(builderRecoveryRecord);
+  }
+  await stateStore.recordRun(builderTaskPacket, builderExecution, buildRunRecoveryState(builderRecoveryRecord));
 
   const builderManifest = buildJobManifest(
     layout,
@@ -841,26 +852,11 @@ export async function runPhase1Local(repoRoot: string): Promise<Phase1RunSummary
     executions,
     adapterInfo.adapter_id,
   );
-  if (builderManifest.status === "AWAITING_OWNER" || builderManifest.status === "AWAITING_TAKEOVER") {
-    const recoveryCard = buildRecoveryCard(builderTaskPacket, builderExecution);
-    approvalRecords.push(await writeApprovalArchive(layout.approvalRoot(recoveryCard.card_id), recoveryCard, null));
-  }
-  const builderManifestWithRecovery = buildJobManifest(
-    layout,
-    builderTaskPacket,
-    baseBranch,
-    planRecord,
-    freezeRecord,
-    approvalRecord,
-    approvalRecords,
-    executions,
-    adapterInfo.adapter_id,
-  );
-  await writeJobManifest(layout.manifestPath, builderManifestWithRecovery);
+  await writeJobManifest(layout.manifestPath, builderManifest);
 
   let qaTaskPacket: TaskPacket | null = null;
   let qaExecution: AdapterExecutionResult | null = null;
-  let manifestForChecksums = builderManifestWithRecovery;
+  let manifestForChecksums = builderManifest;
   let latestTaskPacketForIntegrity = builderTaskPacket;
   const extraChecksumPaths: string[] = [];
   if (builderExecution.runResult.status === "SUCCESS") {
@@ -893,7 +889,14 @@ export async function runPhase1Local(repoRoot: string): Promise<Phase1RunSummary
     );
     qaExecution = await normalizeRunArtifacts(layout, await adapter.execute(qaEnvelope));
     executions.push(qaExecution);
-    await stateStore.recordRun(qaTaskPacket, qaExecution);
+    let qaRecoveryRecord: Awaited<ReturnType<typeof writeApprovalArchive>> | null = null;
+    const qaJobState = mapRunExitToJobState(qaExecution.runResult.status, qaExecution.runResult.run_role);
+    if (qaJobState === "AWAITING_OWNER" || qaJobState === "AWAITING_TAKEOVER") {
+      const recoveryCard = buildRecoveryCard(qaTaskPacket, qaExecution);
+      qaRecoveryRecord = await writeApprovalArchive(layout.approvalRoot(recoveryCard.card_id), recoveryCard, null);
+      approvalRecords.push(qaRecoveryRecord);
+    }
+    await stateStore.recordRun(qaTaskPacket, qaExecution, buildRunRecoveryState(qaRecoveryRecord));
 
     const finalManifest = buildJobManifest(
       layout,
@@ -906,31 +909,16 @@ export async function runPhase1Local(repoRoot: string): Promise<Phase1RunSummary
       executions,
       adapterInfo.adapter_id,
     );
-    if (finalManifest.status === "AWAITING_OWNER" || finalManifest.status === "AWAITING_TAKEOVER") {
-      const recoveryCard = buildRecoveryCard(qaTaskPacket, qaExecution);
-      approvalRecords.push(await writeApprovalArchive(layout.approvalRoot(recoveryCard.card_id), recoveryCard, null));
-    }
-    const finalManifestWithRecovery = buildJobManifest(
-      layout,
-      qaTaskPacket,
-      baseBranch,
-      planRecord,
-      freezeRecord,
-      approvalRecord,
-      approvalRecords,
-      executions,
-      adapterInfo.adapter_id,
-    );
-    manifestForChecksums = finalManifestWithRecovery;
-    await writeJobManifest(layout.manifestPath, finalManifestWithRecovery);
+    manifestForChecksums = finalManifest;
+    await writeJobManifest(layout.manifestPath, finalManifest);
 
     if (qaExecution.runResult.status === "SUCCESS") {
       const completedAt = nowIso();
       const finalization = await finalizeArchive({
         layout,
-        manifest: finalManifestWithRecovery,
-        environment: buildEnvironmentSnapshotMetadata(layout, finalManifestWithRecovery),
-        finalSummary: buildFinalSummaryMetadata(layout, qaTaskPacket, finalManifestWithRecovery, executions, completedAt),
+        manifest: finalManifest,
+        environment: buildEnvironmentSnapshotMetadata(layout, finalManifest),
+        finalSummary: buildFinalSummaryMetadata(layout, qaTaskPacket, finalManifest, executions, completedAt),
       });
       manifestForChecksums = finalization.manifest;
       extraChecksumPaths.push(finalization.environment_path, finalization.final_summary_path);

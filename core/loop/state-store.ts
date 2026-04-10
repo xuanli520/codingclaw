@@ -47,6 +47,12 @@ function createStoryTrace(taskPacket: TaskPacket): StoryTrace {
   };
 }
 
+export interface RunRecoveryState {
+  card_id: string;
+  waiting_on: "owner" | "takeover";
+  resume_action: string;
+}
+
 function renderProgress(
   taskPacket: TaskPacket,
   jobState: JobState,
@@ -70,7 +76,32 @@ function renderProgress(
   ].join("\n");
 }
 
-function renderRiskRegister(openRisks: string[]): string {
+function renderRiskRegister(
+  jobState: JobState,
+  openRisks: string[],
+  recoveryState: RunRecoveryState | null = null,
+): string {
+  let mitigationStatus: string[];
+  let ownerReviewNeeds: string[];
+  if (jobState === "AWAITING_OWNER") {
+    mitigationStatus = [
+      `- recovery card ${recoveryState?.card_id ?? "n/a"} is archived and waiting for owner decision`,
+      `- resume action: ${recoveryState?.resume_action ?? "Wait for owner input before continuing."}`,
+    ];
+    ownerReviewNeeds = ["- owner review is required before continuing"];
+  } else if (jobState === "AWAITING_TAKEOVER") {
+    mitigationStatus = [
+      `- recovery card ${recoveryState?.card_id ?? "n/a"} is archived and waiting for takeover`,
+      `- resume action: ${recoveryState?.resume_action ?? "Wait for takeover before continuing."}`,
+    ];
+    ownerReviewNeeds = ["- takeover is required before continuing"];
+  } else if (openRisks.length === 0) {
+    mitigationStatus = ["- no mitigation is required"];
+    ownerReviewNeeds = ["- none"];
+  } else {
+    mitigationStatus = ["- fix the active blockers before the next run"];
+    ownerReviewNeeds = ["- owner review is required if fixback cannot stay in scope"];
+  }
   return [
     "# Risk Register",
     "",
@@ -80,7 +111,7 @@ function renderRiskRegister(openRisks: string[]): string {
     "",
     "## Mitigation Status",
     "",
-    ...(openRisks.length === 0 ? ["- no mitigation is required"] : ["- fix the active blockers before the next run"]),
+    ...mitigationStatus,
     "",
     "## Escalated Risks",
     "",
@@ -88,7 +119,7 @@ function renderRiskRegister(openRisks: string[]): string {
     "",
     "## Owner Review Needs",
     "",
-    ...(openRisks.length === 0 ? ["- none"] : ["- owner review is required if fixback cannot stay in scope"]),
+    ...ownerReviewNeeds,
     "",
     "## Last Updated",
     "",
@@ -110,15 +141,22 @@ function approvalDecisionEntry(): string {
   ].join("\n");
 }
 
-function runDecisionEntry(runId: string, jobState: JobState): string {
+function runDecisionEntry(runId: string, jobState: JobState, recoveryState: RunRecoveryState | null = null): string {
+  const decisionSummary =
+    jobState === "AWAITING_OWNER"
+      ? `The control shell archived recovery card ${recoveryState?.card_id ?? "n/a"} and is waiting for owner decision.`
+      : jobState === "AWAITING_TAKEOVER"
+        ? `The control shell archived recovery card ${recoveryState?.card_id ?? "n/a"} and is waiting for takeover.`
+        : "The control shell recorded the latest run outcome.";
   return [
     `## ${nowIso()}`,
     "",
-    "- card_id: n/a",
+    `- card_id: ${recoveryState?.card_id ?? "n/a"}`,
     `- run_id: ${runId}`,
-    "- decision summary: The control shell recorded the latest run outcome.",
+    `- decision summary: ${decisionSummary}`,
     `- resulting job state: ${jobState}`,
     `- next required action: ${nextRequiredActionFromState(jobState)}`,
+    ...(recoveryState === null ? [] : [`- recovery resume action: ${recoveryState.resume_action}`]),
     "",
   ].join("\n");
 }
@@ -251,7 +289,7 @@ export class StateStore {
     }
 
     if (!(await pathExists(this.riskRegisterPath))) {
-      await this.writeMirroredText(this.riskRegisterPath, "risk-register.en.md", renderRiskRegister([]));
+      await this.writeMirroredText(this.riskRegisterPath, "risk-register.en.md", renderRiskRegister("READY_TO_RUN", []));
     }
 
     if (!(await pathExists(this.handoffPath))) {
@@ -360,7 +398,11 @@ export class StateStore {
     );
   }
 
-  async recordRun(taskPacket: TaskPacket, execution: AdapterExecutionResult): Promise<void> {
+  async recordRun(
+    taskPacket: TaskPacket,
+    execution: AdapterExecutionResult,
+    recoveryState: RunRecoveryState | null = null,
+  ): Promise<void> {
     const jobState = mapRunExitToJobState(execution.runResult.status, execution.runResult.run_role);
     const loopMetrics = await readJson<LoopMetricsFile>(this.loopMetricsPath);
     const storyQueue = await readJson<StoryQueueFile>(this.storyQueuePath);
@@ -432,6 +474,10 @@ export class StateStore {
         ? "The builder completed the local slice and handed off to QA."
         : execution.runResult.run_role === "qa" && execution.runResult.status === "SUCCESS"
           ? "QA closed the local proof-of-concept story and the job is ready to archive."
+          : jobState === "AWAITING_OWNER" && recoveryState !== null
+            ? `${execution.runResult.run_role} ended with status ${execution.runResult.status}. Waiting for owner decision via recovery card ${recoveryState.card_id}.`
+            : jobState === "AWAITING_TAKEOVER" && recoveryState !== null
+              ? `${execution.runResult.run_role} ended with status ${execution.runResult.status}. Waiting for takeover via recovery card ${recoveryState.card_id}.`
           : `${execution.runResult.run_role} ended with status ${execution.runResult.status}.`;
 
     const existingDecisions = await readText(this.decisionsPath);
@@ -439,11 +485,15 @@ export class StateStore {
     await this.writeMirroredJson(this.loopMetricsPath, "loop-metrics.json", loopMetrics);
     await this.writeMirroredJson(this.traceIndexPath, "trace-index.json", traceIndex);
     await this.writeMirroredText(this.handoffPath, "handoff.en.md", handoffContent);
-    await this.writeMirroredText(this.riskRegisterPath, "risk-register.en.md", renderRiskRegister(blockers));
+    await this.writeMirroredText(
+      this.riskRegisterPath,
+      "risk-register.en.md",
+      renderRiskRegister(jobState, blockers, recoveryState),
+    );
     await this.writeMirroredText(
       this.decisionsPath,
       "decisions.en.md",
-      `${existingDecisions.trimEnd()}\n\n${runDecisionEntry(execution.runResult.run_id, jobState)}`,
+      `${existingDecisions.trimEnd()}\n\n${runDecisionEntry(execution.runResult.run_id, jobState, recoveryState)}`,
     );
     await this.writeMirroredText(
       this.progressPath,
@@ -467,7 +517,11 @@ export class StateStore {
 
     const existingDecisions = await readText(this.decisionsPath);
     await this.writeMirroredJson(this.storyQueuePath, "story-queue.json", storyQueue);
-    await this.writeMirroredText(this.riskRegisterPath, "risk-register.en.md", renderRiskRegister([reason]));
+    await this.writeMirroredText(
+      this.riskRegisterPath,
+      "risk-register.en.md",
+      renderRiskRegister("INTEGRITY_FAILED", [reason]),
+    );
     await this.writeMirroredText(
       this.decisionsPath,
       "decisions.en.md",
