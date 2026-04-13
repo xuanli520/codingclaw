@@ -1,15 +1,8 @@
 import { join } from "node:path";
 import { mapRunExitToJobState, nextRequiredActionFromState, runningJobStateForRole } from "../contracts/status.ts";
-import {
-  ensureDir,
-  nowIso,
-  pathExists,
-  readJson,
-  readText,
-  uniqueStrings,
-  writeJson,
-  writeText,
-} from "./support.ts";
+import { ensureDir, nowIso, pathExists, readText, uniqueStrings } from "./support.ts";
+import { createStateScopeResolver, type StateScopeResolver } from "./state-scope.ts";
+import { atomicWriteBatch, recoverPendingBatch, withWriteLock } from "./state-write.ts";
 import type {
   ActiveStoryFile,
   AdapterExecutionResult,
@@ -192,60 +185,124 @@ export interface StateStorePaths {
   liveStateRoot?: string;
 }
 
+const STATE_FILE_ORDER = [
+  "progress.en.md",
+  "story-queue.json",
+  "active-story.json",
+  "handoff.en.md",
+  "risk-register.en.md",
+  "loop-metrics.json",
+  "decisions.en.md",
+  "trace-index.json",
+] as const;
+
+type StateFileName = (typeof STATE_FILE_ORDER)[number];
+type SerializedState = Partial<Record<StateFileName, string>>;
+
+function serializeJson(value: unknown): string {
+  return `${JSON.stringify(value, null, 2)}\n`;
+}
+
 export class StateStore {
   private readonly stateRoot: string;
   private readonly liveStateRoot: string;
-  private readonly progressPath: string;
-  private readonly storyQueuePath: string;
-  private readonly activeStoryPath: string;
-  private readonly handoffPath: string;
-  private readonly riskRegisterPath: string;
-  private readonly loopMetricsPath: string;
-  private readonly decisionsPath: string;
+  private readonly scopeResolver: StateScopeResolver;
   private readonly traceIndexPath: string;
 
   constructor(repoRoot: string, paths: StateStorePaths = {}) {
-    this.stateRoot = paths.archiveStateRoot ?? join(repoRoot, "state");
-    this.liveStateRoot = paths.liveStateRoot ?? join(repoRoot, "state");
-    this.progressPath = join(this.stateRoot, "progress.en.md");
-    this.storyQueuePath = join(this.stateRoot, "story-queue.json");
-    this.activeStoryPath = join(this.stateRoot, "active-story.json");
-    this.handoffPath = join(this.stateRoot, "handoff.en.md");
-    this.riskRegisterPath = join(this.stateRoot, "risk-register.en.md");
-    this.loopMetricsPath = join(this.stateRoot, "loop-metrics.json");
-    this.decisionsPath = join(this.stateRoot, "decisions.en.md");
-    this.traceIndexPath = join(this.stateRoot, "trace-index.json");
+    this.scopeResolver = createStateScopeResolver(
+      repoRoot,
+      paths.archiveStateRoot ?? join(repoRoot, "state"),
+      paths.liveStateRoot ?? join(repoRoot, "state"),
+    );
+    this.stateRoot = this.scopeResolver.roots.rootStateRoot;
+    this.liveStateRoot = this.scopeResolver.roots.liveStateRoot;
+    this.traceIndexPath = this.scopeResolver.resolveRootPath("trace-index.json");
   }
 
-  private mirrorPath(fileName: string): string {
-    return join(this.liveStateRoot, fileName);
+  private rootPath(fileName: StateFileName): string {
+    return this.scopeResolver.resolveRootPath(fileName);
   }
 
-  private async writeMirroredText(path: string, fileName: string, value: string): Promise<void> {
-    await writeText(path, value);
-    const mirrorPath = this.mirrorPath(fileName);
-    if (mirrorPath !== path) {
-      await writeText(mirrorPath, value);
+  private mirrorPath(fileName: StateFileName): string {
+    return this.scopeResolver.resolveLivePath(fileName);
+  }
+
+  private snapshotPath(runId: string, fileName: StateFileName): string {
+    return this.scopeResolver.resolveRunPath(runId, fileName);
+  }
+
+  private async loadCanonicalState(): Promise<SerializedState> {
+    await recoverPendingBatch(this.stateRoot);
+    const state: SerializedState = {};
+    for (const fileName of STATE_FILE_ORDER) {
+      const path = this.rootPath(fileName);
+      if (await pathExists(path)) {
+        state[fileName] = await readText(path);
+      }
     }
+    return state;
   }
 
-  private async writeMirroredJson(path: string, fileName: string, value: unknown): Promise<void> {
-    await writeJson(path, value);
-    const mirrorPath = this.mirrorPath(fileName);
-    if (mirrorPath !== path) {
-      await writeJson(mirrorPath, value);
+  private parseJsonState<T>(state: SerializedState, fileName: StateFileName): T {
+    const serialized = state[fileName];
+    if (serialized === undefined) {
+      throw new Error(`missing canonical state file: ${fileName}`);
     }
+    return JSON.parse(serialized) as T;
   }
 
-  getTraceIndexPath(): string {
-    return this.traceIndexPath;
+  private readTextState(state: SerializedState, fileName: StateFileName): string {
+    const serialized = state[fileName];
+    if (serialized === undefined) {
+      throw new Error(`missing canonical state file: ${fileName}`);
+    }
+    return serialized;
   }
 
-  async bootstrap(taskPacket: TaskPacket): Promise<void> {
-    await ensureDir(this.stateRoot);
-    await ensureDir(this.liveStateRoot);
+  private setJsonState(state: SerializedState, fileName: StateFileName, value: unknown): void {
+    state[fileName] = serializeJson(value);
+  }
 
-    if (!(await pathExists(this.storyQueuePath))) {
+  private setTextState(state: SerializedState, fileName: StateFileName, value: string): void {
+    state[fileName] = value;
+  }
+
+  private async persistState(state: SerializedState, runId: string): Promise<void> {
+    const entries: Array<{ path: string; content: string }> = [];
+    const seenPaths = new Set<string>();
+    for (const fileName of STATE_FILE_ORDER) {
+      const content = state[fileName];
+      if (content === undefined) {
+        continue;
+      }
+      for (const path of [this.rootPath(fileName), this.mirrorPath(fileName), this.snapshotPath(runId, fileName)]) {
+        const dedupeKey = path.toLowerCase();
+        if (seenPaths.has(dedupeKey)) {
+          continue;
+        }
+        seenPaths.add(dedupeKey);
+        entries.push({ path, content });
+      }
+    }
+    await atomicWriteBatch(this.stateRoot, entries);
+  }
+
+  private async mutateState<T>(runId: string, mutate: (state: SerializedState) => Promise<T>): Promise<T> {
+    return withWriteLock(
+      this.stateRoot,
+      async () => {
+        const state = await this.loadCanonicalState();
+        const result = await mutate(state);
+        await this.persistState(state, runId);
+        return result;
+      },
+      { owner: "StateStore" },
+    );
+  }
+
+  private bootstrapInitialState(taskPacket: TaskPacket, state: SerializedState): void {
+    if (state["story-queue.json"] === undefined) {
       const storyQueue: StoryQueueFile = {
         job_id: taskPacket.job_id,
         freeze_version: taskPacket.freeze_version,
@@ -260,10 +317,10 @@ export class StateStore {
           },
         ],
       };
-      await this.writeMirroredJson(this.storyQueuePath, "story-queue.json", storyQueue);
+      this.setJsonState(state, "story-queue.json", storyQueue);
     }
 
-    if (!(await pathExists(this.traceIndexPath))) {
+    if (state["trace-index.json"] === undefined) {
       const traceIndex: TraceIndex = {
         job_id: taskPacket.job_id,
         freeze_id: taskPacket.freeze_id,
@@ -273,28 +330,28 @@ export class StateStore {
           [taskPacket.story.story_id]: createStoryTrace(taskPacket),
         },
       };
-      await this.writeMirroredJson(this.traceIndexPath, "trace-index.json", traceIndex);
+      this.setJsonState(state, "trace-index.json", traceIndex);
     }
 
-    if (!(await pathExists(this.loopMetricsPath))) {
+    if (state["loop-metrics.json"] === undefined) {
       const loopMetrics: LoopMetricsFile = {
         job_id: taskPacket.job_id,
         runs: [],
       };
-      await this.writeMirroredJson(this.loopMetricsPath, "loop-metrics.json", loopMetrics);
+      this.setJsonState(state, "loop-metrics.json", loopMetrics);
     }
 
-    if (!(await pathExists(this.decisionsPath))) {
-      await this.writeMirroredText(this.decisionsPath, "decisions.en.md", ["# Decisions", "", approvalDecisionEntry()].join("\n"));
+    if (state["decisions.en.md"] === undefined) {
+      this.setTextState(state, "decisions.en.md", ["# Decisions", "", approvalDecisionEntry()].join("\n"));
     }
 
-    if (!(await pathExists(this.riskRegisterPath))) {
-      await this.writeMirroredText(this.riskRegisterPath, "risk-register.en.md", renderRiskRegister("READY_TO_RUN", []));
+    if (state["risk-register.en.md"] === undefined) {
+      this.setTextState(state, "risk-register.en.md", renderRiskRegister("READY_TO_RUN", []));
     }
 
-    if (!(await pathExists(this.handoffPath))) {
-      await this.writeMirroredText(
-        this.handoffPath,
+    if (state["handoff.en.md"] === undefined) {
+      this.setTextState(
+        state,
         "handoff.en.md",
         [
           "# Handoff",
@@ -343,59 +400,72 @@ export class StateStore {
         ].join("\n"),
       );
     }
+  }
 
-    await this.writeMirroredText(
-      this.progressPath,
-      "progress.en.md",
-      renderProgress(
-        taskPacket,
-        "READY_TO_RUN",
-        "",
-        "builder",
-        "The fixed local Phase 1 story is approved and ready for the builder run.",
-      ),
-    );
+  getTraceIndexPath(): string {
+    return this.traceIndexPath;
+  }
+
+  async bootstrap(taskPacket: TaskPacket): Promise<void> {
+    await ensureDir(this.stateRoot);
+    await ensureDir(this.liveStateRoot);
+    await this.mutateState(taskPacket.run_id, async (state) => {
+      this.bootstrapInitialState(taskPacket, state);
+      this.setTextState(
+        state,
+        "progress.en.md",
+        renderProgress(
+          taskPacket,
+          "READY_TO_RUN",
+          "",
+          "builder",
+          "The fixed local Phase 1 story is approved and ready for the builder run.",
+        ),
+      );
+    });
   }
 
   async prepareRun(taskPacket: TaskPacket): Promise<void> {
-    const jobState = runningJobStateForRole(taskPacket.run_role);
-    const storyQueue = await readJson<StoryQueueFile>(this.storyQueuePath);
-    storyQueue.freeze_version = taskPacket.freeze_version;
-    storyQueue.stories = storyQueue.stories.map((story) =>
-      story.story_id === taskPacket.story.story_id
-        ? {
-            ...story,
-            queue_state: jobState,
-            last_run_id: taskPacket.run_id,
-          }
-        : story,
-    );
+    await this.mutateState(taskPacket.run_id, async (state) => {
+      const jobState = runningJobStateForRole(taskPacket.run_role);
+      const storyQueue = this.parseJsonState<StoryQueueFile>(state, "story-queue.json");
+      storyQueue.freeze_version = taskPacket.freeze_version;
+      storyQueue.stories = storyQueue.stories.map((story) =>
+        story.story_id === taskPacket.story.story_id
+          ? {
+              ...story,
+              queue_state: jobState,
+              last_run_id: taskPacket.run_id,
+            }
+          : story,
+      );
 
-    const activeStory: ActiveStoryFile = {
-      story_id: taskPacket.story.story_id,
-      freeze_version: taskPacket.freeze_version,
-      run_id: taskPacket.run_id,
-      run_role: taskPacket.run_role,
-      objective: taskPacket.story.story_objective,
-      acceptance_ids: taskPacket.story.acceptance_ids,
-      verification_targets: taskPacket.story.verification_targets,
-      stop_conditions: taskPacket.story.stop_conditions,
-      expected_artifacts: taskPacket.story.expected_artifacts,
-    };
+      const activeStory: ActiveStoryFile = {
+        story_id: taskPacket.story.story_id,
+        freeze_version: taskPacket.freeze_version,
+        run_id: taskPacket.run_id,
+        run_role: taskPacket.run_role,
+        objective: taskPacket.story.story_objective,
+        acceptance_ids: taskPacket.story.acceptance_ids,
+        verification_targets: taskPacket.story.verification_targets,
+        stop_conditions: taskPacket.story.stop_conditions,
+        expected_artifacts: taskPacket.story.expected_artifacts,
+      };
 
-    await this.writeMirroredJson(this.storyQueuePath, "story-queue.json", storyQueue);
-    await this.writeMirroredJson(this.activeStoryPath, "active-story.json", activeStory);
-    await this.writeMirroredText(
-      this.progressPath,
-      "progress.en.md",
-      renderProgress(
-        taskPacket,
-        jobState,
-        taskPacket.run_id,
-        taskPacket.run_role,
-        `${taskPacket.run_role} is executing the fixed local proof-of-concept story.`,
-      ),
-    );
+      this.setJsonState(state, "story-queue.json", storyQueue);
+      this.setJsonState(state, "active-story.json", activeStory);
+      this.setTextState(
+        state,
+        "progress.en.md",
+        renderProgress(
+          taskPacket,
+          jobState,
+          taskPacket.run_id,
+          taskPacket.run_role,
+          `${taskPacket.run_role} is executing the fixed local proof-of-concept story.`,
+        ),
+      );
+    });
   }
 
   async recordRun(
@@ -403,135 +473,131 @@ export class StateStore {
     execution: AdapterExecutionResult,
     recoveryState: RunRecoveryState | null = null,
   ): Promise<void> {
-    const jobState = mapRunExitToJobState(execution.runResult.status, execution.runResult.run_role);
-    const loopMetrics = await readJson<LoopMetricsFile>(this.loopMetricsPath);
-    const storyQueue = await readJson<StoryQueueFile>(this.storyQueuePath);
-    const traceIndex = await readJson<TraceIndex>(this.traceIndexPath);
     const handoffContent = await readText(execution.handoffPath);
+    await this.mutateState(execution.runResult.run_id, async (state) => {
+      const jobState = mapRunExitToJobState(execution.runResult.status, execution.runResult.run_role);
+      const loopMetrics = this.parseJsonState<LoopMetricsFile>(state, "loop-metrics.json");
+      const storyQueue = this.parseJsonState<StoryQueueFile>(state, "story-queue.json");
+      const traceIndex = this.parseJsonState<TraceIndex>(state, "trace-index.json");
 
-    const metricEntry: LoopMetricEntry = {
-      run_id: execution.runResult.run_id,
-      story_id: execution.runResult.story_id,
-      run_role: execution.runResult.run_role,
-      started_at: execution.runResult.started_at,
-      ended_at: execution.runResult.ended_at,
-      duration_s: execution.runResult.duration_s,
-      estimated_cost: 0,
-      actual_cost: 0,
-      retry_index: taskPacket.run_attempt - 1,
-      run_exit_status: execution.runResult.status,
-    };
-    loopMetrics.runs.push(metricEntry);
-
-    storyQueue.freeze_version = taskPacket.freeze_version;
-    storyQueue.stories = storyQueue.stories.map((story) =>
-      story.story_id === taskPacket.story.story_id
-        ? {
-            ...story,
-            queue_state: jobState,
-            last_run_id: execution.runResult.run_id,
-          }
-        : story,
-    );
-
-    const storyTrace = traceIndex.stories[taskPacket.story.story_id] ?? createStoryTrace(taskPacket);
-    const newArtifactRefs = execution.workerOutput.evidence_paths.map(
-      (path) => `artifacts/runs/${execution.runResult.run_id}/${path}`,
-    );
-
-    for (const acceptanceId of taskPacket.story.acceptance_ids) {
-      const previous = storyTrace.acceptance[acceptanceId] ?? createTraceEntry();
-      storyTrace.acceptance[acceptanceId] = {
-        status: execution.workerOutput.acceptance_status,
-        artifacts: uniqueStrings([...previous.artifacts, ...newArtifactRefs]),
-        updated_at: nowIso(),
-        latest_run_id: execution.runResult.run_id,
+      const metricEntry: LoopMetricEntry = {
+        run_id: execution.runResult.run_id,
+        story_id: execution.runResult.story_id,
+        run_role: execution.runResult.run_role,
+        started_at: execution.runResult.started_at,
+        ended_at: execution.runResult.ended_at,
+        duration_s: execution.runResult.duration_s,
+        estimated_cost: 0,
+        actual_cost: 0,
+        retry_index: taskPacket.run_attempt - 1,
+        run_exit_status: execution.runResult.status,
       };
-    }
+      loopMetrics.runs.push(metricEntry);
 
-    for (const checkName of taskPacket.story.mandatory_checks) {
-      const previous = storyTrace.mandatory_checks[checkName] ?? createTraceEntry();
-      storyTrace.mandatory_checks[checkName] = {
-        status: execution.workerOutput.mandatory_check_status,
-        artifacts: uniqueStrings([...previous.artifacts, ...newArtifactRefs]),
-        updated_at: nowIso(),
-        latest_run_id: execution.runResult.run_id,
-      };
-    }
+      storyQueue.freeze_version = taskPacket.freeze_version;
+      storyQueue.stories = storyQueue.stories.map((story) =>
+        story.story_id === taskPacket.story.story_id
+          ? {
+              ...story,
+              queue_state: jobState,
+              last_run_id: execution.runResult.run_id,
+            }
+          : story,
+      );
 
-    storyTrace.story_id = taskPacket.story.story_id;
-    storyTrace.latest_run_id = execution.runResult.run_id;
-    storyTrace.latest_run_role = execution.runResult.run_role;
-    storyTrace.latest_qa_status =
-      execution.runResult.run_role === "qa" ? execution.runResult.status : storyTrace.latest_qa_status;
-    storyTrace.artifact_locations = uniqueStrings([...storyTrace.artifact_locations, ...newArtifactRefs]);
-    traceIndex.active_story_id = taskPacket.story.story_id;
-    traceIndex.stories[taskPacket.story.story_id] = storyTrace;
+      const storyTrace = traceIndex.stories[taskPacket.story.story_id] ?? createStoryTrace(taskPacket);
+      const newArtifactRefs = execution.workerOutput.evidence_paths.map(
+        (path) => `artifacts/runs/${execution.runResult.run_id}/${path}`,
+      );
 
-    const blockers = execution.workerOutput.blockers;
-    const progressSummary =
-      execution.runResult.run_role === "builder" && execution.runResult.status === "SUCCESS"
-        ? "The builder completed the local slice and handed off to QA."
-        : execution.runResult.run_role === "qa" && execution.runResult.status === "SUCCESS"
-          ? "QA closed the local proof-of-concept story and the job is ready to archive."
-          : jobState === "AWAITING_OWNER" && recoveryState !== null
-            ? `${execution.runResult.run_role} ended with status ${execution.runResult.status}. Waiting for owner decision via recovery card ${recoveryState.card_id}.`
-            : jobState === "AWAITING_TAKEOVER" && recoveryState !== null
-              ? `${execution.runResult.run_role} ended with status ${execution.runResult.status}. Waiting for takeover via recovery card ${recoveryState.card_id}.`
-          : `${execution.runResult.run_role} ended with status ${execution.runResult.status}.`;
+      for (const acceptanceId of taskPacket.story.acceptance_ids) {
+        const previous = storyTrace.acceptance[acceptanceId] ?? createTraceEntry();
+        storyTrace.acceptance[acceptanceId] = {
+          status: execution.workerOutput.acceptance_status,
+          artifacts: uniqueStrings([...previous.artifacts, ...newArtifactRefs]),
+          updated_at: nowIso(),
+          latest_run_id: execution.runResult.run_id,
+        };
+      }
 
-    const existingDecisions = await readText(this.decisionsPath);
-    await this.writeMirroredJson(this.storyQueuePath, "story-queue.json", storyQueue);
-    await this.writeMirroredJson(this.loopMetricsPath, "loop-metrics.json", loopMetrics);
-    await this.writeMirroredJson(this.traceIndexPath, "trace-index.json", traceIndex);
-    await this.writeMirroredText(this.handoffPath, "handoff.en.md", handoffContent);
-    await this.writeMirroredText(
-      this.riskRegisterPath,
-      "risk-register.en.md",
-      renderRiskRegister(jobState, blockers, recoveryState),
-    );
-    await this.writeMirroredText(
-      this.decisionsPath,
-      "decisions.en.md",
-      `${existingDecisions.trimEnd()}\n\n${runDecisionEntry(execution.runResult.run_id, jobState, recoveryState)}`,
-    );
-    await this.writeMirroredText(
-      this.progressPath,
-      "progress.en.md",
-      renderProgress(taskPacket, jobState, execution.runResult.run_id, execution.runResult.run_role, progressSummary),
-    );
+      for (const checkName of taskPacket.story.mandatory_checks) {
+        const previous = storyTrace.mandatory_checks[checkName] ?? createTraceEntry();
+        storyTrace.mandatory_checks[checkName] = {
+          status: execution.workerOutput.mandatory_check_status,
+          artifacts: uniqueStrings([...previous.artifacts, ...newArtifactRefs]),
+          updated_at: nowIso(),
+          latest_run_id: execution.runResult.run_id,
+        };
+      }
+
+      storyTrace.story_id = taskPacket.story.story_id;
+      storyTrace.latest_run_id = execution.runResult.run_id;
+      storyTrace.latest_run_role = execution.runResult.run_role;
+      storyTrace.latest_qa_status =
+        execution.runResult.run_role === "qa" ? execution.runResult.status : storyTrace.latest_qa_status;
+      storyTrace.artifact_locations = uniqueStrings([...storyTrace.artifact_locations, ...newArtifactRefs]);
+      traceIndex.active_story_id = taskPacket.story.story_id;
+      traceIndex.stories[taskPacket.story.story_id] = storyTrace;
+
+      const blockers = execution.workerOutput.blockers;
+      const progressSummary =
+        execution.runResult.run_role === "builder" && execution.runResult.status === "SUCCESS"
+          ? "The builder completed the local slice and handed off to QA."
+          : execution.runResult.run_role === "qa" && execution.runResult.status === "SUCCESS"
+            ? "QA closed the local proof-of-concept story and the job is ready to archive."
+            : jobState === "AWAITING_OWNER" && recoveryState !== null
+              ? `${execution.runResult.run_role} ended with status ${execution.runResult.status}. Waiting for owner decision via recovery card ${recoveryState.card_id}.`
+              : jobState === "AWAITING_TAKEOVER" && recoveryState !== null
+                ? `${execution.runResult.run_role} ended with status ${execution.runResult.status}. Waiting for takeover via recovery card ${recoveryState.card_id}.`
+                : `${execution.runResult.run_role} ended with status ${execution.runResult.status}.`;
+
+      const existingDecisions = this.readTextState(state, "decisions.en.md");
+      this.setJsonState(state, "story-queue.json", storyQueue);
+      this.setJsonState(state, "loop-metrics.json", loopMetrics);
+      this.setJsonState(state, "trace-index.json", traceIndex);
+      this.setTextState(state, "handoff.en.md", handoffContent);
+      this.setTextState(state, "risk-register.en.md", renderRiskRegister(jobState, blockers, recoveryState));
+      this.setTextState(
+        state,
+        "decisions.en.md",
+        `${existingDecisions.trimEnd()}\n\n${runDecisionEntry(execution.runResult.run_id, jobState, recoveryState)}`,
+      );
+      this.setTextState(
+        state,
+        "progress.en.md",
+        renderProgress(taskPacket, jobState, execution.runResult.run_id, execution.runResult.run_role, progressSummary),
+      );
+    });
   }
 
   async recordIntegrityFailure(taskPacket: TaskPacket, reason: string): Promise<void> {
-    const storyQueue = await readJson<StoryQueueFile>(this.storyQueuePath);
-    storyQueue.freeze_version = taskPacket.freeze_version;
-    storyQueue.stories = storyQueue.stories.map((story) =>
-      story.story_id === taskPacket.story.story_id
-        ? {
-            ...story,
-            queue_state: "INTEGRITY_FAILED",
-            last_run_id: taskPacket.run_id,
-          }
-        : story,
-    );
+    await this.mutateState(taskPacket.run_id, async (state) => {
+      const storyQueue = this.parseJsonState<StoryQueueFile>(state, "story-queue.json");
+      storyQueue.freeze_version = taskPacket.freeze_version;
+      storyQueue.stories = storyQueue.stories.map((story) =>
+        story.story_id === taskPacket.story.story_id
+          ? {
+              ...story,
+              queue_state: "INTEGRITY_FAILED",
+              last_run_id: taskPacket.run_id,
+            }
+          : story,
+      );
 
-    const existingDecisions = await readText(this.decisionsPath);
-    await this.writeMirroredJson(this.storyQueuePath, "story-queue.json", storyQueue);
-    await this.writeMirroredText(
-      this.riskRegisterPath,
-      "risk-register.en.md",
-      renderRiskRegister("INTEGRITY_FAILED", [reason]),
-    );
-    await this.writeMirroredText(
-      this.decisionsPath,
-      "decisions.en.md",
-      `${existingDecisions.trimEnd()}\n\n${integrityFailureDecisionEntry(taskPacket.run_id, reason)}`,
-    );
-    await this.writeMirroredText(
-      this.progressPath,
-      "progress.en.md",
-      renderProgress(taskPacket, "INTEGRITY_FAILED", taskPacket.run_id, taskPacket.run_role, reason),
-    );
+      const existingDecisions = this.readTextState(state, "decisions.en.md");
+      this.setJsonState(state, "story-queue.json", storyQueue);
+      this.setTextState(state, "risk-register.en.md", renderRiskRegister("INTEGRITY_FAILED", [reason]));
+      this.setTextState(
+        state,
+        "decisions.en.md",
+        `${existingDecisions.trimEnd()}\n\n${integrityFailureDecisionEntry(taskPacket.run_id, reason)}`,
+      );
+      this.setTextState(
+        state,
+        "progress.en.md",
+        renderProgress(taskPacket, "INTEGRITY_FAILED", taskPacket.run_id, taskPacket.run_role, reason),
+      );
+    });
   }
 
   async recordArchiveFinalization(
@@ -540,35 +606,37 @@ export class StateStore {
     latestRunRole: RunRole,
     finalSummaryPath: string,
   ): Promise<void> {
-    const storyQueue = await readJson<StoryQueueFile>(this.storyQueuePath);
-    storyQueue.freeze_version = taskPacket.freeze_version;
-    storyQueue.stories = storyQueue.stories.map((story) =>
-      story.story_id === taskPacket.story.story_id
-        ? {
-            ...story,
-            queue_state: "COMPLETED",
-            last_run_id: latestRunId,
-          }
-        : story,
-    );
+    await this.mutateState(latestRunId, async (state) => {
+      const storyQueue = this.parseJsonState<StoryQueueFile>(state, "story-queue.json");
+      storyQueue.freeze_version = taskPacket.freeze_version;
+      storyQueue.stories = storyQueue.stories.map((story) =>
+        story.story_id === taskPacket.story.story_id
+          ? {
+              ...story,
+              queue_state: "COMPLETED",
+              last_run_id: latestRunId,
+            }
+          : story,
+      );
 
-    const existingDecisions = await readText(this.decisionsPath);
-    await this.writeMirroredJson(this.storyQueuePath, "story-queue.json", storyQueue);
-    await this.writeMirroredText(
-      this.decisionsPath,
-      "decisions.en.md",
-      `${existingDecisions.trimEnd()}\n\n${archiveFinalizationDecisionEntry(latestRunId, finalSummaryPath)}`,
-    );
-    await this.writeMirroredText(
-      this.progressPath,
-      "progress.en.md",
-      renderProgress(
-        taskPacket,
-        "COMPLETED",
-        latestRunId,
-        latestRunRole,
-        "Archive finalization completed and the canonical local job bundle is closed.",
-      ),
-    );
+      const existingDecisions = this.readTextState(state, "decisions.en.md");
+      this.setJsonState(state, "story-queue.json", storyQueue);
+      this.setTextState(
+        state,
+        "decisions.en.md",
+        `${existingDecisions.trimEnd()}\n\n${archiveFinalizationDecisionEntry(latestRunId, finalSummaryPath)}`,
+      );
+      this.setTextState(
+        state,
+        "progress.en.md",
+        renderProgress(
+          taskPacket,
+          "COMPLETED",
+          latestRunId,
+          latestRunRole,
+          "Archive finalization completed and the canonical local job bundle is closed.",
+        ),
+      );
+    });
   }
 }

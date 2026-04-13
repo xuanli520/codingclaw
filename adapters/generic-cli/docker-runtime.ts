@@ -8,6 +8,7 @@ import type {
   RunExitStatus,
   RunRole,
 } from "../../core/contracts/types.ts";
+import { ShellPolicy } from "../../ops/guards/shell-policy.ts";
 
 export const CONTAINER_PATHS = {
   repo: "/work/repo",
@@ -59,6 +60,7 @@ export interface DockerWorkerLaunchRequest {
   envelope_path: string;
   runtime: ContainerRuntimeConfig;
   time_limits: Record<string, unknown>;
+  environment?: Record<string, string>;
 }
 
 export interface DockerWorkerLaunchResult {
@@ -350,6 +352,15 @@ function dockerUserArgs(): string[] {
   return ["--user", `${process.getuid()}:${process.getgid()}`];
 }
 
+function launchEnvironment(request: DockerWorkerLaunchRequest): Record<string, string> {
+  return {
+    HOME: "/work/runtime-home/home",
+    XDG_CACHE_HOME: "/work/cache",
+    BUN_INSTALL_CACHE_DIR: "/work/cache/bun",
+    ...(request.environment ?? {}),
+  };
+}
+
 function buildRunCommand(dockerExecutable: string, request: DockerWorkerLaunchRequest): string[] {
   return [
     dockerExecutable,
@@ -360,12 +371,7 @@ function buildRunCommand(dockerExecutable: string, request: DockerWorkerLaunchRe
     ...dockerUserArgs(),
     "--workdir",
     request.runtime.workdir,
-    "--env",
-    "HOME=/work/runtime-home/home",
-    "--env",
-    "XDG_CACHE_HOME=/work/cache",
-    "--env",
-    "BUN_INSTALL_CACHE_DIR=/work/cache/bun",
+    ...Object.entries(launchEnvironment(request)).flatMap(([key, value]) => ["--env", `${key}=${value}`]),
     ...request.runtime.mounts.flatMap((mount) => ["--mount", mountArg(mount)]),
     request.image,
     "bun",
@@ -551,12 +557,14 @@ export class DockerWorkerLauncher implements RoleImageResolver {
   private readonly preparedImages = new Set<string>();
   private readonly baseImage: string;
   private readonly dockerExecutable: string;
+  private readonly shellPolicy: ShellPolicy;
 
   constructor(private readonly repoRoot: string) {
     const override = process.env[BASE_IMAGE_ENV_VAR]?.trim();
     this.baseImage = override && override.length > 0 ? override : DEFAULT_BASE_IMAGE;
     const dockerOverride = process.env[DOCKER_BIN_ENV_VAR]?.trim();
     this.dockerExecutable = dockerOverride && dockerOverride.length > 0 ? dockerOverride : "docker";
+    this.shellPolicy = new ShellPolicy(repoRoot);
   }
 
   resolve(runRole: RunRole): string {
@@ -636,6 +644,23 @@ export class DockerWorkerLauncher implements RoleImageResolver {
 
   async launch(request: DockerWorkerLaunchRequest): Promise<DockerWorkerLaunchResult> {
     const command = buildRunCommand(this.dockerExecutable, request);
+    const shellDecision = await this.shellPolicy.evaluate({
+      executable: this.dockerExecutable,
+      command,
+      envNames: Object.keys(launchEnvironment(request)),
+      dynamicEnvNames: Object.keys(request.environment ?? {}),
+      mounts: request.runtime.mounts,
+      runRole: request.run_role,
+    });
+    if (!shellDecision.allowed) {
+      return {
+        command,
+        exitCode: 1,
+        stdout: "",
+        stderr: shellDecision.reason ?? "host shell policy blocked launch",
+        failure_status: shellDecision.status ?? "FAILED_POLICY",
+      };
+    }
     const imagePreparationFailure = await this.ensureRoleImage(request.run_role, request.image);
     if (imagePreparationFailure) {
       return {

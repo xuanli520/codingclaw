@@ -1,4 +1,5 @@
-import { join } from "node:path";
+import { copyFile, readdir, readlink, symlink } from "node:fs/promises";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { GenericCliAdapter } from "../../adapters/generic-cli/adapter.ts";
 import { buildArtifactIndex } from "../../ops/archive/artifact-index.ts";
 import { writeApprovalArchive } from "../../ops/archive/approvals.ts";
@@ -55,6 +56,14 @@ const BUILDER_EXPECTED_ARTIFACTS = [
   "logs/command-log.txt",
   "logs/worker.log",
   "metadata/task-packet.en.json",
+  "metadata/state/active-story.json",
+  "metadata/state/decisions.en.md",
+  "metadata/state/handoff.en.md",
+  "metadata/state/loop-metrics.json",
+  "metadata/state/progress.en.md",
+  "metadata/state/risk-register.en.md",
+  "metadata/state/story-queue.json",
+  "metadata/state/trace-index.json",
   "metadata/timings.json",
   "metadata/run-result.json",
   "metadata/artifact-index.json",
@@ -78,6 +87,14 @@ const QA_EXPECTED_ARTIFACTS = [
   "logs/command-log.txt",
   "logs/worker.log",
   "metadata/task-packet.en.json",
+  "metadata/state/active-story.json",
+  "metadata/state/decisions.en.md",
+  "metadata/state/handoff.en.md",
+  "metadata/state/loop-metrics.json",
+  "metadata/state/progress.en.md",
+  "metadata/state/risk-register.en.md",
+  "metadata/state/story-queue.json",
+  "metadata/state/trace-index.json",
   "metadata/timings.json",
   "metadata/run-result.json",
   "metadata/artifact-index.json",
@@ -141,6 +158,47 @@ async function buildDependencySnapshotDigest(repoRoot: string): Promise<string> 
     return sha256Text(inputs.join("\n"));
   }
   return "absent";
+}
+
+const JOB_REPO_SNAPSHOT_EXCLUDES = new Set([".omx", "jobs", "state"]);
+
+function assertSnapshotSymlinkTarget(sourceRoot: string, sourcePath: string, targetPath: string): string {
+  const resolvedTarget = resolve(dirname(sourcePath), targetPath);
+  const relativeTarget = relative(resolve(sourceRoot), resolvedTarget);
+  if (relativeTarget === "" || (!relativeTarget.startsWith("..") && !isAbsolute(relativeTarget))) {
+    return targetPath;
+  }
+  throw new Error(`repo snapshot symlink escaped the source repo: ${sourcePath}`);
+}
+
+async function copyRepoSnapshot(sourceRoot: string, targetRoot: string, relativePath = ""): Promise<void> {
+  const sourceDir = relativePath.length === 0 ? sourceRoot : join(sourceRoot, relativePath);
+  const entries = await readdir(sourceDir, { withFileTypes: true });
+  for (const entry of entries) {
+    if (relativePath.length === 0 && JOB_REPO_SNAPSHOT_EXCLUDES.has(entry.name)) {
+      continue;
+    }
+    const childRelativePath = relativePath.length === 0 ? entry.name : join(relativePath, entry.name);
+    const sourcePath = join(sourceRoot, childRelativePath);
+    const targetPath = join(targetRoot, childRelativePath);
+    if (entry.isDirectory()) {
+      await ensureDir(targetPath);
+      await copyRepoSnapshot(sourceRoot, targetRoot, childRelativePath);
+      continue;
+    }
+    if (entry.isSymbolicLink()) {
+      await ensureDir(dirname(targetPath));
+      await symlink(assertSnapshotSymlinkTarget(sourceRoot, sourcePath, await readlink(sourcePath)), targetPath);
+      continue;
+    }
+    await ensureDir(dirname(targetPath));
+    await copyFile(sourcePath, targetPath);
+  }
+}
+
+async function stageJobRepoWorkspace(repoRoot: string, workerRepoRoot: string): Promise<void> {
+  await ensureDir(workerRepoRoot);
+  await copyRepoSnapshot(repoRoot, workerRepoRoot);
 }
 
 async function assertFreshJobRoot(layout: ReturnType<typeof resolveJobRootLayout>): Promise<void> {
@@ -850,6 +908,8 @@ export async function runPhase1Local(repoRoot: string): Promise<Phase1RunSummary
   const layout = resolveJobRootLayout(repoRoot, approvalCard.job_id);
   await assertFreshJobRoot(layout);
   await ensureJobRootLayout(layout);
+  await stageJobRepoWorkspace(repoRoot, layout.repoArchiveRoot);
+  const workerRepoRoot = layout.repoArchiveRoot;
 
   const builderRunId = createRunId("builder");
   const qaRunId = createRunId("qa");
@@ -859,23 +919,23 @@ export async function runPhase1Local(repoRoot: string): Promise<Phase1RunSummary
   const qaPreviousHandoffPath = join(builderRunRoot, "reports", "handoff.en.md");
 
   const builderTaskPacket = await buildTaskPacket(
-    repoRoot,
+    workerRepoRoot,
     baseCommit,
     "builder",
     builderRunId,
     layout.archiveStateRoot,
     builderRunRoot,
-    layout.runtimeHomeRoot,
+    layout.runtimeHomeRootForRole("builder"),
     builderPreviousHandoffPath,
   );
   const qaTaskPacketPreview = await buildTaskPacket(
-    repoRoot,
+    workerRepoRoot,
     baseCommit,
     "qa",
     qaRunId,
     layout.archiveStateRoot,
     qaRunRoot,
-    layout.runtimeHomeRoot,
+    layout.runtimeHomeRootForRole("qa"),
     qaPreviousHandoffPath,
   );
 
@@ -896,9 +956,9 @@ export async function runPhase1Local(repoRoot: string): Promise<Phase1RunSummary
     adapters: [adapterInfo.adapter_id],
     runRoles: ["builder", "qa"],
     architectureDirection: [
-      "Use one canonical job root under jobs/<job_id>/ for governance, approvals, state, runtime-home, and run bundles.",
+      "Use one canonical job root under jobs/<job_id>/ for governance, an isolated repo workspace, approvals, state, runtime-home, and run bundles.",
       "Preserve the existing builder to QA worker order and local generic CLI adapter.",
-      "Mirror the latest canonical state files into state/ for control-shell recovery.",
+      "Mirror the latest canonical state files into state/ for control-shell recovery, while keeping builder and QA runtime homes role-scoped.",
     ],
     milestones: [
       "Write the fixed plan and approval archive.",
@@ -967,11 +1027,11 @@ export async function runPhase1Local(repoRoot: string): Promise<Phase1RunSummary
   const executions: AdapterExecutionResult[] = [];
   await stateStore.prepareRun(builderTaskPacket);
   const builderEnvelope = await buildRunEnvelope(
-    repoRoot,
+    workerRepoRoot,
     builderTaskPacket,
     layout.archiveStateRoot,
     builderRunRoot,
-    layout.runtimeHomeRoot,
+    layout.runtimeHomeRootForRole("builder"),
     builderPreviousHandoffPath,
     approvalRecord.snapshot_path,
     {
@@ -1015,23 +1075,23 @@ export async function runPhase1Local(repoRoot: string): Promise<Phase1RunSummary
   const extraChecksumPaths: string[] = [];
   if (builderExecution.runResult.status === "SUCCESS") {
     qaTaskPacket = await buildTaskPacket(
-      repoRoot,
+      workerRepoRoot,
       baseCommit,
       "qa",
       qaRunId,
       layout.archiveStateRoot,
       qaRunRoot,
-      layout.runtimeHomeRoot,
+      layout.runtimeHomeRootForRole("qa"),
       qaPreviousHandoffPath,
     );
     latestTaskPacketForIntegrity = qaTaskPacket;
     await stateStore.prepareRun(qaTaskPacket);
     const qaEnvelope = await buildRunEnvelope(
-      repoRoot,
+      workerRepoRoot,
       qaTaskPacket,
       layout.archiveStateRoot,
       qaRunRoot,
-      layout.runtimeHomeRoot,
+      layout.runtimeHomeRootForRole("qa"),
       qaPreviousHandoffPath,
       approvalRecord.snapshot_path,
       {

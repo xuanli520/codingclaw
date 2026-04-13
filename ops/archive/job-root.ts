@@ -17,6 +17,7 @@ export interface JobRootLayout {
   environmentPath: string;
   finalSummaryPath: string;
   runtimeHomeRoot: string;
+  runtimeHomeRootForRole: (runRole: "builder" | "qa") => string;
   planPath: string;
   freezePath: string;
   freezeJsonPath: string;
@@ -40,6 +41,7 @@ export function resolveJobRootLayout(repoRoot: string, jobId: string): JobRootLa
   const finalRoot = join(artifactRoot, "final");
   const artifactMetadataRoot = join(artifactRoot, "metadata");
   const runtimeHomeRoot = join(jobRoot, "runtime-home", "phase1-local");
+  const runtimeHomeRootForRole = (runRole: "builder" | "qa") => join(runtimeHomeRoot, runRole);
 
   return {
     repoRoot,
@@ -57,6 +59,7 @@ export function resolveJobRootLayout(repoRoot: string, jobId: string): JobRootLa
     environmentPath: join(artifactMetadataRoot, "environment.json"),
     finalSummaryPath: join(finalRoot, "final-summary.en.md"),
     runtimeHomeRoot,
+    runtimeHomeRootForRole,
     planPath: join(jobRoot, "DEVELOPMENT_PLAN.en.md"),
     freezePath: join(jobRoot, "CONTRACT_FREEZE.en.md"),
     freezeJsonPath: join(jobRoot, "contract-freeze.json"),
@@ -80,4 +83,6 @@ export async function ensureJobRootLayout(layout: JobRootLayout): Promise<void> 
   await ensureDir(layout.finalRoot);
   await ensureDir(layout.artifactMetadataRoot);
   await ensureDir(layout.runtimeHomeRoot);
+  await ensureDir(layout.runtimeHomeRootForRole("builder"));
+  await ensureDir(layout.runtimeHomeRootForRole("qa"));
 }

@@ -39,7 +39,8 @@
   "requested_capabilities": [
     "filesystem_read",
     "filesystem_write",
-    "shell_command"
+    "shell_command",
+    "container_control"
   ],
   "story": {
     "story_id": "STORY-PHASE1-LOCAL-001",

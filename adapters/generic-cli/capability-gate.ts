@@ -38,9 +38,19 @@ export class CapabilityGate {
     return this.manifestPromise;
   }
 
-  async evaluate(requestedCapabilities: string[]): Promise<CapabilityGateDecision> {
+  async evaluate(requestedCapabilities: string[], requiredCapabilities: string[] = []): Promise<CapabilityGateDecision> {
     const manifest = await this.loadManifest();
-    for (const capability of uniqueStrings(requestedCapabilities)) {
+    const requested = uniqueStrings(requestedCapabilities);
+    for (const capability of uniqueStrings(requiredCapabilities)) {
+      if (!requested.includes(capability)) {
+        return {
+          allowed: false,
+          reason: `required capability is missing for profile ${manifest.profile_id}: ${capability}`,
+          status: "FAILED_POLICY",
+        };
+      }
+    }
+    for (const capability of requested) {
       const entry = manifest.capabilities[capability];
       if (entry === undefined) {
         return {

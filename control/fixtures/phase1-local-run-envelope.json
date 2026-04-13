@@ -41,6 +41,7 @@
   "requested_capabilities": [
     "filesystem_read",
     "filesystem_write",
-    "shell_command"
+    "shell_command",
+    "container_control"
   ]
 }

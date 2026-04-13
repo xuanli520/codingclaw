@@ -5,5 +5,50 @@
   "retry_limit": 0,
   "log_redaction": "no-secrets-in-fixture",
   "scope_policy": "single-approved-story-only",
-  "failure_policy": "return-standard-run-exit-status"
+  "failure_policy": "return-standard-run-exit-status",
+  "shell_policy": {
+    "blocked_commands": [
+      "rm",
+      "del",
+      "format",
+      "diskpart"
+    ],
+    "dangerous_patterns": [
+      "Authorization\\s*:\\s*Bearer\\s+\\S+",
+      "cookie\\s*[:=]\\s*\\S+",
+      "token\\s*[:=]\\s*\\S+"
+    ],
+    "never_auto_approve_patterns": [
+      "--privileged",
+      "--pid=host",
+      "--network=host",
+      "type=bind,source=/,target=/"
+    ],
+    "env_allowlist": [
+      "^HOME$",
+      "^XDG_CACHE_HOME$",
+      "^BUN_INSTALL_CACHE_DIR$",
+      "^CODINGCLAW_CRED_[A-Z0-9_]+$"
+    ]
+  },
+  "credential_injection": {
+    "supported_modes": [
+      "env"
+    ],
+    "supported_sources": [
+      "fixture",
+      "env"
+    ],
+    "fixture_env_prefix": "CODINGCLAW_SECRET_FIXTURE_",
+    "credential_env_prefix": "CODINGCLAW_CRED_"
+  },
+  "log_redaction_rules": {
+    "replace_with": "[REDACTED]",
+    "patterns": [
+      "Authorization\\s*:\\s*Bearer\\s+\\S+",
+      "cookie\\s*[:=]\\s*[^\\r\\n;]+",
+      "token\\s*[:=]\\s*\\S+",
+      "password\\s*[:=]\\s*\\S+"
+    ]
+  }
 }

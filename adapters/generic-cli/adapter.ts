@@ -12,7 +12,10 @@ import type {
   WorkerOutput,
 } from "../../core/contracts/types.ts";
 import { DockerWorkerLauncher, type DockerWorkerLaunchResult, materializeContainerizedRunEnvelope } from "./docker-runtime.ts";
-import { CapabilityGate } from "./capability-gate.ts";
+import { CapabilityGate, type CapabilityGateDecision } from "./capability-gate.ts";
+import { CredentialInjector } from "../../ops/guards/credential-injector.ts";
+
+const REQUIRED_LAUNCH_CAPABILITIES = ["container_control"] as const;
 
 function workerScriptForRole(rootPath: string, runRole: RunRole): string {
   if (runRole === "builder") {
@@ -289,10 +292,12 @@ async function writeQaFallbackArtifacts(
 export class GenericCliAdapter {
   private readonly dockerLauncher: DockerWorkerLauncher;
   private readonly capabilityGate: CapabilityGate;
+  private readonly credentialInjector: CredentialInjector;
 
   constructor(private readonly repoRoot: string) {
     this.dockerLauncher = new DockerWorkerLauncher(repoRoot);
     this.capabilityGate = new CapabilityGate(repoRoot);
+    this.credentialInjector = new CredentialInjector(repoRoot);
   }
 
   async execute(envelope: RunEnvelope): Promise<AdapterExecutionResult> {
@@ -305,12 +310,36 @@ export class GenericCliAdapter {
     const handoffPath = join(runRoot, "reports", "handoff.en.md");
     await ensureHostWritableRunLayout(runRoot);
     let taskPacketPath = envelope.task_packet_path;
+    const taskPacket = await readJson<TaskPacket>(taskPacketPath);
+    const canonicalRequestedCapabilities = uniqueStrings(taskPacket.requested_capabilities);
+    const envelopeRequestedCapabilities = uniqueStrings(envelope.requested_capabilities);
 
     const startedAtDate = new Date();
     let launchResult: DockerWorkerLaunchResult;
-    let capabilityDecision;
+    let capabilityDecision: CapabilityGateDecision;
+    const credentialInjection = await this.credentialInjector.resolve(taskPacket, envelope);
+    if (canonicalRequestedCapabilities.join("\n") !== envelopeRequestedCapabilities.join("\n")) {
+      launchResult = {
+        command: ["<capability-gate>", ...canonicalRequestedCapabilities],
+        exitCode: 1,
+        stdout: "",
+        stderr: "run envelope requested_capabilities do not match the canonical task packet",
+        failure_status: "FAILED_POLICY",
+      };
+      capabilityDecision = {
+        allowed: false,
+        reason: launchResult.stderr,
+        status: launchResult.failure_status,
+      };
+    } else {
     try {
-      capabilityDecision = await this.capabilityGate.evaluate(envelope.requested_capabilities);
+      capabilityDecision = await this.capabilityGate.evaluate(
+        canonicalRequestedCapabilities,
+        [
+          ...REQUIRED_LAUNCH_CAPABILITIES,
+          ...(taskPacket.credential_injection_requests?.length ? ["secret_injection"] : []),
+        ],
+      );
     } catch (error) {
       capabilityDecision = {
         allowed: false,
@@ -318,13 +347,22 @@ export class GenericCliAdapter {
         status: "FAILED_POLICY",
       };
     }
+    }
     if (!capabilityDecision.allowed) {
       launchResult = {
-        command: ["<capability-gate>", ...envelope.requested_capabilities],
+        command: ["<capability-gate>", ...canonicalRequestedCapabilities],
         exitCode: 1,
         stdout: "",
         stderr: capabilityDecision.reason ?? "capability gate rejected the launch",
         failure_status: capabilityDecision.status ?? "FAILED_POLICY",
+      };
+    } else if (!credentialInjection.allowed) {
+      launchResult = {
+        command: ["<credential-injector>"],
+        exitCode: 1,
+        stdout: "",
+        stderr: credentialInjection.reason ?? "credential injection rejected the launch",
+        failure_status: credentialInjection.status ?? "FAILED_POLICY",
       };
     } else {
       try {
@@ -341,29 +379,40 @@ export class GenericCliAdapter {
           envelope_path: materialization.runtime.envelope_container_path,
           runtime: materialization.runtime,
           time_limits: envelope.time_limits,
+          environment: credentialInjection.environment,
         });
       } catch (error) {
         launchResult = unexpectedLaunchResult(error);
       }
     }
+    const redactedLaunchResult: DockerWorkerLaunchResult = {
+      ...launchResult,
+      command: credentialInjection.redactor.redactCommand(launchResult.command),
+      stdout: credentialInjection.redactor.redactText(launchResult.stdout),
+      stderr: credentialInjection.redactor.redactText(launchResult.stderr),
+    };
     const exitCode = launchResult.exitCode;
-    const stdout = launchResult.stdout;
-    const stderr = launchResult.stderr;
+    const stdout = redactedLaunchResult.stdout;
+    const stderr = redactedLaunchResult.stderr;
     const endedAtDate = new Date();
 
     let workerOutput: WorkerOutput;
     let usedFallbackWorkerOutput = false;
     if (exitCode === 0) {
       try {
-        workerOutput = JSON.parse(stdout) as WorkerOutput;
+        workerOutput = JSON.parse(launchResult.stdout) as WorkerOutput;
       } catch {
         workerOutput = fallbackWorkerOutput("worker output was not valid JSON");
         usedFallbackWorkerOutput = true;
       }
     } else {
-      workerOutput = fallbackWorkerOutput(launchFailureText(launchResult), launchResult.failure_status ?? "FAILED_EXECUTION");
+      workerOutput = fallbackWorkerOutput(
+        launchFailureText(redactedLaunchResult),
+        launchResult.failure_status ?? "FAILED_EXECUTION",
+      );
       usedFallbackWorkerOutput = true;
     }
+    workerOutput = credentialInjection.redactor.redactWorkerOutput(workerOutput);
 
     const durationMs = Math.max(0, endedAtDate.getTime() - startedAtDate.getTime());
     const runTimings: RunTimingMetadata = {
@@ -379,7 +428,7 @@ export class GenericCliAdapter {
       duration_s: Math.max(0, Math.round(durationMs / 1000)),
     };
 
-    await writeText(commandLogPath, renderCommandLog(launchResult.command, exitCode, stdout, stderr));
+    await writeText(commandLogPath, renderCommandLog(redactedLaunchResult.command, exitCode, stdout, stderr));
     await writeWorkerLog(workerLogPath, {
       job_id: envelope.job_id,
       run_id: envelope.run_id,
@@ -398,7 +447,6 @@ export class GenericCliAdapter {
       }
       if (envelope.run_role === "qa") {
         workerOutput = withQaFallbackPaths(workerOutput);
-        const taskPacket = await readJson<TaskPacket>(envelope.task_packet_path);
         await writeQaFallbackArtifacts(runRoot, envelope, taskPacket, workerOutput);
       }
     }

@@ -57,6 +57,13 @@ export interface StoryContract {
   escalation_rules: string[];
 }
 
+export interface CredentialInjectionRequest {
+  secret_handle: string;
+  credential_alias: string;
+  allowed_host_patterns: string[];
+  injection_mode: "env";
+}
+
 export interface TaskPacket {
   job_id: string;
   freeze_id: string;
@@ -79,6 +86,7 @@ export interface TaskPacket {
   approval_context: Record<string, unknown>;
   previous_handoff_path: string;
   requested_capabilities: string[];
+  credential_injection_requests?: CredentialInjectionRequest[];
   story: StoryContract;
 }
 

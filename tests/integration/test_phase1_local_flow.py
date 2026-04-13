@@ -549,6 +549,8 @@ def test_phase1_local_success_records_contract_checks_and_acceptance_mapping(tmp
     qa_run_root = next(path for path in run_roots if path.name.startswith("run-qa-"))
     builder_check = json.loads((builder_run_root / "evidence" / "test-results" / "builder-check.json").read_text(encoding="utf-8"))
     qa_verdict = json.loads((qa_run_root / "metadata" / "qa-verdict.json").read_text(encoding="utf-8"))
+    builder_state_snapshot = json.loads((builder_run_root / "metadata" / "state" / "trace-index.json").read_text(encoding="utf-8"))
+    qa_state_snapshot = json.loads((qa_run_root / "metadata" / "state" / "trace-index.json").read_text(encoding="utf-8"))
 
     assert builder_check["self_checks"]["approval_context"] == "pass"
     assert builder_check["self_checks"]["artifact_presence"] == "pass"
@@ -558,6 +560,8 @@ def test_phase1_local_success_records_contract_checks_and_acceptance_mapping(tmp
     assert qa_verdict["language_validation"]["status"] == "pass"
     assert qa_verdict["scope_validation"]["undeclared_builder_artifacts"] == []
     assert qa_verdict["mandatory_checks"]["acceptance-closure"]["status"] == "pass"
+    assert builder_state_snapshot["stories"]["STORY-PHASE1-LOCAL-001"]["latest_run_role"] == "builder"
+    assert qa_state_snapshot["stories"]["STORY-PHASE1-LOCAL-001"]["latest_run_role"] == "qa"
 
 
 @pytest.mark.integration
@@ -583,11 +587,11 @@ def test_phase1_local_builder_container_materialization_uses_read_only_inputs_an
     mounts = {mount["target"]: mount for mount in builder_capture["mounts"]}
     job_root = repo_root / "jobs" / "job-phase1-local"
 
-    assert builder_task_packet["repo_path"] == repo_root.as_posix()
+    assert builder_task_packet["repo_path"] == (job_root / "repo").as_posix()
     assert builder_task_packet["state_path"] == (job_root / "state").as_posix()
-    assert builder_task_packet["runtime_home"] == (job_root / "runtime-home" / "phase1-local").as_posix()
+    assert builder_task_packet["runtime_home"] == (job_root / "runtime-home" / "phase1-local" / "builder").as_posix()
     assert builder_task_packet["artifact_path"] == (job_root / "artifacts" / "runs" / builder_envelope["run_id"]).as_posix()
-    assert "container_control" not in builder_task_packet["requested_capabilities"]
+    assert "container_control" in builder_task_packet["requested_capabilities"]
     assert container_paths["repo_path"] == "/work/repo"
     assert container_paths["state_path"] == "/work/state"
     assert container_paths["runtime_home"] == "/work/runtime-home"
@@ -599,21 +603,20 @@ def test_phase1_local_builder_container_materialization_uses_read_only_inputs_an
         (repo_root / "adapters" / "generic-cli" / "adapter-capability.json").read_text(encoding="utf-8")
     )
     filesystem_write_scope = set(capability_manifest["capabilities"]["filesystem_write"]["scope"])
-    repo_job_root_path = f"/work/repo/jobs/job-phase1-local"
-    repo_run_root_path = f"{repo_job_root_path}/artifacts/runs/{builder_envelope['run_id']}"
     task_packet_target = f"{builder_envelope['artifact_path']}/metadata/task-packet.en.json"
+    mount_sources = {mount["target"]: mount["source"] for mount in builder_capture["mounts"]}
 
+    assert mount_sources["/work/repo"] == (job_root / "repo").as_posix()
     assert mounts["/work/repo"].get("readonly") != "true"
-    assert mounts[repo_job_root_path]["readonly"] == "true"
     assert mounts["/work/state"]["readonly"] == "true"
     assert mounts["/work/artifacts"]["readonly"] == "true"
     assert mounts[builder_envelope["artifact_path"]].get("readonly") != "true"
-    assert mounts[repo_run_root_path].get("readonly") != "true"
     assert mounts[task_packet_target]["readonly"] == "true"
-    assert mounts[f"{repo_run_root_path}/metadata/task-packet.en.json"]["readonly"] == "true"
+    assert not any(target.startswith("/work/repo/jobs/") for target in mounts)
     assert mounts["/work/runtime-home"].get("readonly") != "true"
-    assert mounts[f"{repo_job_root_path}/runtime-home/phase1-local"].get("readonly") != "true"
-    assert filesystem_write_scope == {"repo", "run-artifacts", "runtime-home"}
+    assert mount_sources["/work/runtime-home"] == (job_root / "runtime-home" / "phase1-local" / "builder").as_posix()
+    assert {"run-artifacts", "runtime-home"}.issubset(filesystem_write_scope)
+    assert all(source != repo_root.as_posix() for source in mount_sources.values())
 
     manifest = json.loads((job_root / "job-manifest.json").read_text(encoding="utf-8"))
     freeze = json.loads((job_root / "contract-freeze.json").read_text(encoding="utf-8"))
@@ -622,7 +625,7 @@ def test_phase1_local_builder_container_materialization_uses_read_only_inputs_an
 
     assert expected_task_packet_path == f"artifacts/runs/{builder_envelope['run_id']}/metadata/task-packet.en.json"
     assert json.loads((job_root / expected_task_packet_path).read_text(encoding="utf-8")) == builder_task_packet
-    assert not (job_root / "runtime-home" / "phase1-local" / "envelopes" / "container" / "task-packets").exists()
+    assert not (job_root / "runtime-home" / "phase1-local" / "builder" / "envelopes" / "container" / "task-packets").exists()
     assert expected_task_packet_path in (job_root / "checksums.txt").read_text(encoding="utf-8")
     assert freeze["task_packet_digests"][builder_envelope["run_id"]] == builder_task_packet["task_packet_sha256"]
 
@@ -653,15 +656,23 @@ def test_phase1_local_qa_packet_keeps_freeze_base_commit_when_builder_moves_head
         check=True,
     ).stdout.strip()
     job_root = repo_root / "jobs" / "job-phase1-local"
+    worker_repo_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=job_root / "repo",
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
     freeze = json.loads((job_root / "contract-freeze.json").read_text(encoding="utf-8"))
     manifest = json.loads((job_root / "job-manifest.json").read_text(encoding="utf-8"))
     qa_capture = load_capture(capture_dir, "qa")
 
-    assert current_head != initial_commit
+    assert current_head == initial_commit
+    assert worker_repo_head != initial_commit
     assert freeze["base_commit"] == initial_commit
     assert manifest["base_commit"] == initial_commit
     assert qa_capture["task_packet"]["base_commit"] == initial_commit
-    assert qa_capture["task_packet"]["base_commit"] != current_head
+    assert qa_capture["task_packet"]["base_commit"] != worker_repo_head
     assert freeze["task_packet_digests"][qa_capture["task_packet"]["run_id"]] == qa_capture["task_packet"]["task_packet_sha256"]
 
 
@@ -754,7 +765,10 @@ def test_phase1_local_capability_gate_stops_undeclared_or_denied_requests_before
     repo_root = export_repo(tmp_path)
     fake_docker = write_fake_docker(tmp_path)
     capture_dir = tmp_path / "captures"
-    write_requested_capabilities(repo_root, ["filesystem_read", "filesystem_write", "shell_command", "browser"])
+    write_requested_capabilities(
+        repo_root,
+        ["filesystem_read", "filesystem_write", "shell_command", "container_control", "browser"],
+    )
     result = run_phase1(
         repo_root,
         {
@@ -773,7 +787,7 @@ def test_phase1_local_capability_gate_stops_undeclared_or_denied_requests_before
     assert [run["run_role"] for run in manifest["runs"]] == ["builder"]
     assert [run["run_exit_status"] for run in manifest["runs"]] == ["FAILED_POLICY"]
     assert manifest["status"] == "AWAITING_OWNER"
-    assert "<capability-gate> filesystem_read filesystem_write shell_command browser" in command_log
+    assert "<capability-gate> browser container_control filesystem_read filesystem_write shell_command" in command_log
     assert not capture_dir.exists() or not list(capture_dir.iterdir())
 
 
