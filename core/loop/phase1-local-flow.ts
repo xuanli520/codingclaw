@@ -585,6 +585,64 @@ function buildRecoveryCard(taskPacket: TaskPacket, execution: AdapterExecutionRe
   };
 }
 
+async function writeRecoveryTakeoverPacket(
+  taskPacket: TaskPacket,
+  execution: AdapterExecutionResult,
+  approvalRecord: Awaited<ReturnType<typeof writeApprovalArchive>>,
+): Promise<void> {
+  const takeoverPacketPath = execution.takeoverPacketPath ?? join(execution.runRoot, "takeover", "takeover-packet.en.md");
+  execution.takeoverPacketPath = takeoverPacketPath;
+  await writeText(
+    takeoverPacketPath,
+    [
+      "# Takeover Packet",
+      "",
+      "## Run Identity",
+      "",
+      `- job ID: ${taskPacket.job_id}`,
+      `- run ID: ${execution.runResult.run_id}`,
+      `- freeze version: ${taskPacket.freeze_version}`,
+      `- story ID: ${taskPacket.story.story_id}`,
+      `- triggering run role: ${execution.runResult.run_role}`,
+      `- triggering exit status: ${execution.runResult.status}`,
+      "",
+      "## Blocked Step",
+      "",
+      `- exact blocked action: ${execution.workerOutput.open[0] ?? execution.workerOutput.next_action}`,
+      `- reason automation cannot continue: ${approvalRequestReason(execution)}`,
+      "- current page, tool, or environment when relevant: generic-cli worker container",
+      "",
+      "## Required Human Action",
+      "",
+      `- concrete human task: ${execution.workerOutput.next_action}`,
+      "- allowed action boundary: stay inside the active story, freeze, and archived run root",
+      "- forbidden actions: do not widen scope, rewrite approvals, or bypass evidence capture",
+      "- expected completion signal: archive the takeover outcome under the same run_id takeover root",
+      "",
+      "## Access And Approval Context",
+      "",
+      `- approval card ID: ${approvalRecord.card_id}`,
+      "- approved access method: governed local takeover",
+      "- credential handling rule: do not place long-lived secrets in takeover artifacts",
+      `- timeout or expiry condition: ${approvalRecord.timeout_at}`,
+      "",
+      "## Expected Result",
+      "",
+      `- expected output: ${execution.workerOutput.next_action}`,
+      `- artifact destination: artifacts/runs/${execution.runResult.run_id}/takeover/result.en.md`,
+      `- evidence destination: artifacts/runs/${execution.runResult.run_id}/takeover/result.en.md`,
+      `- resume criteria: update pause context via ${approvalRecord.card_id} and reference the same run_id takeover root in the manifest`,
+      "",
+      "## Resume Notes",
+      "",
+      `- next loop role: ${execution.runResult.run_role}`,
+      "- next command or check: review the archived takeover result and decide whether to resume or terminate",
+      "- rollback instruction if the takeover fails: stop the job and return control to owner review",
+      "",
+    ].join("\n"),
+  );
+}
+
 function buildPauseContext(
   execution: AdapterExecutionResult | null,
   approvalRecord: Awaited<ReturnType<typeof writeApprovalArchive>> | null,
@@ -926,6 +984,9 @@ export async function runPhase1Local(repoRoot: string): Promise<Phase1RunSummary
   if (builderJobState === "AWAITING_OWNER" || builderJobState === "AWAITING_TAKEOVER") {
     const recoveryCard = buildRecoveryCard(builderTaskPacket, builderExecution);
     builderRecoveryRecord = await writeApprovalArchive(layout.approvalRoot(recoveryCard.card_id), recoveryCard, null);
+    if (builderJobState === "AWAITING_TAKEOVER") {
+      await writeRecoveryTakeoverPacket(builderTaskPacket, builderExecution, builderRecoveryRecord);
+    }
     approvalRecords.push(builderRecoveryRecord);
   }
   await stateStore.recordRun(builderTaskPacket, builderExecution, buildRunRecoveryState(builderRecoveryRecord));
@@ -983,6 +1044,9 @@ export async function runPhase1Local(repoRoot: string): Promise<Phase1RunSummary
     if (qaJobState === "AWAITING_OWNER" || qaJobState === "AWAITING_TAKEOVER") {
       const recoveryCard = buildRecoveryCard(qaTaskPacket, qaExecution);
       qaRecoveryRecord = await writeApprovalArchive(layout.approvalRoot(recoveryCard.card_id), recoveryCard, null);
+      if (qaJobState === "AWAITING_TAKEOVER") {
+        await writeRecoveryTakeoverPacket(qaTaskPacket, qaExecution, qaRecoveryRecord);
+      }
       approvalRecords.push(qaRecoveryRecord);
     }
     await stateStore.recordRun(qaTaskPacket, qaExecution, buildRunRecoveryState(qaRecoveryRecord));

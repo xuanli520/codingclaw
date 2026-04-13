@@ -361,7 +361,16 @@ export class GenericCliAdapter {
 
     const startedAtDate = new Date();
     let launchResult: DockerWorkerLaunchResult;
-    const capabilityDecision = await this.capabilityGate.evaluate(envelope.requested_capabilities);
+    let capabilityDecision;
+    try {
+      capabilityDecision = await this.capabilityGate.evaluate(envelope.requested_capabilities);
+    } catch (error) {
+      capabilityDecision = {
+        allowed: false,
+        reason: `capability gate could not load adapter policy: ${formatErrorText(error)}`,
+        status: "FAILED_POLICY",
+      };
+    }
     if (!capabilityDecision.allowed) {
       launchResult = {
         command: ["<capability-gate>", ...envelope.requested_capabilities],
