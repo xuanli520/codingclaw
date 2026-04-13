@@ -526,4 +526,5 @@ export interface AdapterExecutionResult {
   artifactIndexPath: string;
   commandLogPath: string;
   handoffPath: string;
+  takeoverPacketPath: string | null;
 }

@@ -111,19 +111,17 @@ function roleArtifacts(runRole: RunRole): { expectedArtifacts: string[]; verific
   };
 }
 
-function buildApprovalDecision(card: ApprovalCardSnapshot): ApprovalDecisionReceipt {
-  return {
-    job_id: card.job_id,
-    card_id: card.card_id,
-    card_type: card.card_type,
-    story_id: card.story_id,
-    freeze_version: card.freeze_version,
-    decision: "approve",
-    actor: "local-owner",
-    decided_at: "2026-04-08T00:00:00Z",
-    card_state: "DECIDED",
-    requested_action: card.requested_action,
-  };
+async function loadApprovalDecision(repoRoot: string, card: ApprovalCardSnapshot): Promise<ApprovalDecisionReceipt> {
+  const decision = await readJson<ApprovalDecisionReceipt>(
+    join(repoRoot, "control", "fixtures", "phase1-local-approval-decision.json"),
+  );
+  if (decision.job_id !== card.job_id || decision.card_id !== card.card_id) {
+    throw new Error("phase1 approval decision fixture does not match the plan approval card");
+  }
+  if (decision.card_state !== "DECIDED") {
+    throw new Error("phase1 approval decision fixture must be decided before freeze generation");
+  }
+  return decision;
 }
 
 async function loadAdapterInfo(repoRoot: string): Promise<{ adapter_id: string; adapter_version: string }> {
@@ -393,7 +391,8 @@ function buildManifestRunRecords(
     run_result_path: layout.relativeToJobRoot(execution.runResultPath),
     artifact_index_path: layout.relativeToJobRoot(execution.artifactIndexPath),
     handoff_path: layout.relativeToJobRoot(execution.handoffPath),
-    takeover_packet_path: null,
+    takeover_packet_path:
+      execution.takeoverPacketPath === null ? null : layout.relativeToJobRoot(execution.takeoverPacketPath),
     started_at: execution.runResult.started_at,
     ended_at: execution.runResult.ended_at,
   }));
@@ -786,7 +785,6 @@ export async function runPhase1Local(repoRoot: string): Promise<Phase1RunSummary
   const approvalCard = await readJson<ApprovalCardSnapshot>(
     join(repoRoot, "control", "fixtures", "phase1-local-approval-card.json"),
   );
-  const decision = buildApprovalDecision(approvalCard);
   const layout = resolveJobRootLayout(repoRoot, approvalCard.job_id);
   await assertFreshJobRoot(layout);
   await ensureJobRootLayout(layout);
@@ -819,11 +817,6 @@ export async function runPhase1Local(repoRoot: string): Promise<Phase1RunSummary
     qaPreviousHandoffPath,
   );
 
-  const approvalRecord = await writeApprovalArchive(layout.approvalRoot(approvalCard.card_id), approvalCard, decision);
-  if (approvalRecord.decision_path === null || approvalRecord.decided_at === null) {
-    throw new Error("phase1 fixture approval must be decided before freeze generation");
-  }
-  const approvalRecords: Array<Awaited<ReturnType<typeof writeApprovalArchive>>> = [approvalRecord];
   const allExpectedArtifacts = uniqueStrings([
     ...builderTaskPacket.story.expected_artifacts,
     ...qaTaskPacketPreview.story.expected_artifacts,
@@ -865,6 +858,15 @@ export async function runPhase1Local(repoRoot: string): Promise<Phase1RunSummary
     openQuestions: ["none"],
     approvalRequested: approvalCard.requested_action,
   });
+  const decision = await loadApprovalDecision(repoRoot, approvalCard);
+  const approvalRecord = await writeApprovalArchive(layout.approvalRoot(approvalCard.card_id), approvalCard, decision);
+  if (approvalRecord.decision_path === null || approvalRecord.decided_at === null) {
+    throw new Error("phase1 fixture approval must be decided before freeze generation");
+  }
+  if (decision.decision !== "approve") {
+    throw new Error("phase1 local execution requires an approved Development Plan before freeze generation");
+  }
+  const approvalRecords: Array<Awaited<ReturnType<typeof writeApprovalArchive>>> = [approvalRecord];
 
   const freezeRecord = await writeContractFreeze(layout.freezePath, layout.freezeJsonPath, {
     metadata: buildFreezeMetadata(

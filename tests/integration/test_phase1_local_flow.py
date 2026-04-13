@@ -19,13 +19,15 @@ def export_repo(tmp_path: Path) -> Path:
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
     tracked_files = subprocess.run(
-        ["git", "ls-files"],
+        ["git", "ls-files", "--cached", "--others", "--exclude-standard"],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
         check=True,
     ).stdout.splitlines()
     for relative_path in tracked_files:
+        if relative_path.startswith(".omx/"):
+            continue
         source = REPO_ROOT / relative_path
         target = repo_root / relative_path
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -304,6 +306,17 @@ def write_fake_docker(tmp_path: Path) -> Path:
                     time.sleep(float(os.environ.get("CODINGCLAW_FAKE_DOCKER_SLEEP", "1")))
                 if mode == "qa_timeout" and envelope["run_role"] == "qa":
                     time.sleep(float(os.environ.get("CODINGCLAW_FAKE_DOCKER_SLEEP", "1")))
+                if mode == "real_worker":
+                    worker_script = map_path(argv[-2], mounts)
+                    container_envelope_path = map_path(argv[-1], mounts)
+                    host_envelope_path = envelope.get("container_runtime", {}).get(
+                        "envelope_host_path",
+                        container_envelope_path,
+                    )
+                    result = subprocess.run(["bun", worker_script, host_envelope_path], capture_output=True, text=True)
+                    sys.stdout.write(result.stdout)
+                    sys.stderr.write(result.stderr)
+                    return result.returncode
 
                 if envelope["run_role"] == "builder":
                     output = create_builder_outputs(envelope, task_packet, artifact_root)
@@ -317,6 +330,11 @@ def write_fake_docker(tmp_path: Path) -> Path:
                         output["open"] = ["credentials required"]
                         output["blockers"] = ["A credential is required before continuing"]
                         output["next_action"] = "provide the requested credential or choose an alternative"
+                    if mode == "builder_awaiting_takeover":
+                        output["status"] = "AWAITING_TAKEOVER"
+                        output["open"] = ["manual takeover required"]
+                        output["blockers"] = ["A local GUI step requires governed takeover"]
+                        output["next_action"] = "open the takeover session and archive the result"
                     if mode == "builder_head_shift":
                         mutate_head(map_path(envelope["repo_path"], mounts))
                 else:
@@ -349,6 +367,24 @@ def write_time_limit_minutes(repo_root: Path, minutes: float) -> None:
         fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
         fixture["time_limits"]["minutes"] = minutes
         fixture_path.write_text(json.dumps(fixture, indent=2) + "\n", encoding="utf-8")
+
+
+def write_requested_capabilities(repo_root: Path, requested_capabilities: list[str]) -> None:
+    for relative_path in [
+        "control/fixtures/phase1-local-run-envelope.json",
+        "control/fixtures/phase1-local-task-packet.en.json",
+    ]:
+        fixture_path = repo_root / relative_path
+        fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+        fixture["requested_capabilities"] = requested_capabilities
+        fixture_path.write_text(json.dumps(fixture, indent=2) + "\n", encoding="utf-8")
+
+
+def write_plan_approval_decision(repo_root: Path, decision: str) -> None:
+    decision_path = repo_root / "control" / "fixtures" / "phase1-local-approval-decision.json"
+    payload = json.loads(decision_path.read_text(encoding="utf-8"))
+    payload["decision"] = decision
+    decision_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
 def load_capture(capture_dir: Path, run_role: str) -> dict:
@@ -413,6 +449,24 @@ def assert_recovery_state_mirror(job_root: Path, recovery_card_id: str) -> None:
     assert "owner review is required" in risk_register.lower()
 
 
+def assert_takeover_pause_context(manifest: dict, job_root: Path, expected_status: str) -> None:
+    pause_context = manifest["pause_context"]
+    assert pause_context["is_paused"] is True
+    assert pause_context["pause_reason"] == expected_status
+    assert pause_context["waiting_on"] == "takeover"
+    assert pause_context["resume_action"]
+    assert pause_context["paused_at"]
+    assert pause_context["related_card_id"]
+    assert pause_context["expires_at"]
+
+    recovery_record = manifest["approvals"][-1]
+    assert recovery_record["card_id"] == pause_context["related_card_id"]
+    assert recovery_record["card_type"] == "recovery"
+    assert recovery_record["card_state"] == "PENDING"
+    recovery_card = json.loads((job_root / "approvals" / recovery_record["card_id"] / "approval-card.json").read_text(encoding="utf-8"))
+    assert recovery_card["recovery_context"]["resume_gate"] == "takeover"
+
+
 @pytest.mark.integration
 @pytest.mark.skipif(shutil.which("bun") is None, reason="bun is required")
 def test_phase1_local_rerun_rejects_mutating_existing_archive(tmp_path):
@@ -440,6 +494,25 @@ def test_phase1_local_rerun_rejects_mutating_existing_archive(tmp_path):
 
 @pytest.mark.integration
 @pytest.mark.skipif(shutil.which("bun") is None, reason="bun is required")
+def test_phase1_local_requires_approved_plan_decision_before_freeze_and_execution(tmp_path):
+    repo_root = export_repo(tmp_path)
+    write_plan_approval_decision(repo_root, "reject")
+    result = run_phase1(repo_root)
+    combined_output = "\n".join(part for part in [result.stdout, result.stderr] if part)
+
+    assert result.returncode != 0
+    assert "requires an approved Development Plan" in combined_output
+
+    job_root = repo_root / "jobs" / "job-phase1-local"
+    assert (job_root / "DEVELOPMENT_PLAN.en.md").exists()
+    assert (job_root / "approvals" / "card-phase1-local-001" / "approval-card.json").exists()
+    assert (job_root / "approvals" / "card-phase1-local-001" / "decision.json").exists()
+    assert not (job_root / "contract-freeze.json").exists()
+    assert not (job_root / "job-manifest.json").exists()
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(shutil.which("bun") is None, reason="bun is required")
 def test_phase1_local_freeze_digest_captures_repo_dependency_inputs(tmp_path):
     repo_root = export_repo(tmp_path)
     result = run_phase1(repo_root)
@@ -449,6 +522,38 @@ def test_phase1_local_freeze_digest_captures_repo_dependency_inputs(tmp_path):
     freeze = json.loads((repo_root / "jobs" / "job-phase1-local" / "contract-freeze.json").read_text(encoding="utf-8"))
 
     assert freeze["dependency_snapshot_digest"] == dependency_snapshot_digest(repo_root)
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(shutil.which("bun") is None, reason="bun is required")
+def test_phase1_local_success_records_contract_checks_and_acceptance_mapping(tmp_path):
+    repo_root = export_repo(tmp_path)
+    fake_docker = write_fake_docker(tmp_path)
+    result = run_phase1(
+        repo_root,
+        {
+            "CODINGCLAW_DOCKER_BIN": str(fake_docker),
+            "CODINGCLAW_FAKE_DOCKER_MODE": "real_worker",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
+
+    job_root = repo_root / "jobs" / "job-phase1-local"
+    run_roots = sorted(path for path in (job_root / "artifacts" / "runs").iterdir() if path.is_dir())
+    builder_run_root = next(path for path in run_roots if path.name.startswith("run-builder-"))
+    qa_run_root = next(path for path in run_roots if path.name.startswith("run-qa-"))
+    builder_check = json.loads((builder_run_root / "evidence" / "test-results" / "builder-check.json").read_text(encoding="utf-8"))
+    qa_verdict = json.loads((qa_run_root / "metadata" / "qa-verdict.json").read_text(encoding="utf-8"))
+
+    assert builder_check["self_checks"]["approval_context"] == "pass"
+    assert builder_check["self_checks"]["artifact_presence"] == "pass"
+    assert builder_check["language_violations"] == []
+    assert sorted(qa_verdict["acceptance_verdicts"]) == ["ACC-PHASE1-BUILDER", "ACC-PHASE1-QA"]
+    assert qa_verdict["reproducibility"]["status"] == "pass"
+    assert qa_verdict["language_validation"]["status"] == "pass"
+    assert qa_verdict["scope_validation"]["undeclared_builder_artifacts"] == []
+    assert qa_verdict["mandatory_checks"]["acceptance-closure"]["status"] == "pass"
 
 
 @pytest.mark.integration
@@ -641,6 +746,65 @@ def test_phase1_local_waiting_recovery_card_preserves_approval_request_details(
 
 @pytest.mark.integration
 @pytest.mark.skipif(shutil.which("bun") is None, reason="bun is required")
+def test_phase1_local_capability_gate_stops_undeclared_or_denied_requests_before_worker_launch(tmp_path):
+    repo_root = export_repo(tmp_path)
+    fake_docker = write_fake_docker(tmp_path)
+    capture_dir = tmp_path / "captures"
+    write_requested_capabilities(repo_root, ["filesystem_read", "filesystem_write", "shell_command", "browser"])
+    result = run_phase1(
+        repo_root,
+        {
+            "CODINGCLAW_DOCKER_BIN": str(fake_docker),
+            "CODINGCLAW_FAKE_DOCKER_CAPTURE_DIR": str(capture_dir),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
+
+    job_root = repo_root / "jobs" / "job-phase1-local"
+    manifest = json.loads((job_root / "job-manifest.json").read_text(encoding="utf-8"))
+    run_root = next(path for path in (job_root / "artifacts" / "runs").iterdir() if path.is_dir())
+    command_log = (run_root / "logs" / "command-log.txt").read_text(encoding="utf-8")
+
+    assert [run["run_role"] for run in manifest["runs"]] == ["builder"]
+    assert [run["run_exit_status"] for run in manifest["runs"]] == ["FAILED_POLICY"]
+    assert manifest["status"] == "AWAITING_OWNER"
+    assert "<capability-gate> filesystem_read filesystem_write shell_command browser" in command_log
+    assert not capture_dir.exists() or not list(capture_dir.iterdir())
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(shutil.which("bun") is None, reason="bun is required")
+def test_phase1_local_takeover_run_writes_takeover_packet_and_manifest_reference(tmp_path):
+    repo_root = export_repo(tmp_path)
+    fake_docker = write_fake_docker(tmp_path)
+    result = run_phase1(
+        repo_root,
+        {
+            "CODINGCLAW_DOCKER_BIN": str(fake_docker),
+            "CODINGCLAW_FAKE_DOCKER_MODE": "builder_awaiting_takeover",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
+
+    job_root = repo_root / "jobs" / "job-phase1-local"
+    manifest = json.loads((job_root / "job-manifest.json").read_text(encoding="utf-8"))
+    run_record = manifest["runs"][0]
+    takeover_packet_path = job_root / run_record["takeover_packet_path"]
+    artifact_index = json.loads((job_root / run_record["artifact_index_path"]).read_text(encoding="utf-8"))
+    indexed_paths = {entry["path"] for entry in artifact_index["artifacts"]}
+
+    assert [run["run_exit_status"] for run in manifest["runs"]] == ["AWAITING_TAKEOVER"]
+    assert manifest["status"] == "AWAITING_TAKEOVER"
+    assert takeover_packet_path.exists()
+    assert run_record["takeover_packet_path"].endswith("takeover/takeover-packet.en.md")
+    assert "takeover/takeover-packet.en.md" in indexed_paths
+    assert_takeover_pause_context(manifest, job_root, "AWAITING_TAKEOVER")
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(shutil.which("bun") is None, reason="bun is required")
 def test_phase1_local_builder_failed_infra_command_log_records_docker_run(tmp_path):
     repo_root = export_repo(tmp_path)
     result = run_phase1(repo_root, {"CODINGCLAW_DOCKER_BIN": "does-not-exist"})
@@ -648,7 +812,8 @@ def test_phase1_local_builder_failed_infra_command_log_records_docker_run(tmp_pa
     assert result.returncode == 0, result.stderr or result.stdout
 
     job_root = repo_root / "jobs" / "job-phase1-local"
-    run_root = next(path for path in (job_root / "artifacts" / "runs").iterdir() if path.is_dir())
+    run_roots = sorted(path for path in (job_root / "artifacts" / "runs").iterdir() if path.is_dir())
+    run_root = next(path for path in run_roots if path.name.startswith("run-builder-"))
     command_log = (run_root / "logs" / "command-log.txt").read_text(encoding="utf-8")
 
     assert "command: does-not-exist run --rm --network none" in command_log

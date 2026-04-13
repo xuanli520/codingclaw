@@ -12,6 +12,7 @@ import type {
   WorkerOutput,
 } from "../../core/contracts/types.ts";
 import { DockerWorkerLauncher, type DockerWorkerLaunchResult, materializeContainerizedRunEnvelope } from "./docker-runtime.ts";
+import { CapabilityGate } from "./capability-gate.ts";
 
 function workerScriptForRole(rootPath: string, runRole: RunRole): string {
   if (runRole === "builder") {
@@ -44,6 +45,12 @@ function formatErrorText(error: unknown): string {
 }
 
 function launchFailureText(launchResult: DockerWorkerLaunchResult): string {
+  if (launchResult.failure_status === "TIMEOUT") {
+    return "worker timed out before producing a complete result";
+  }
+  if (launchResult.failure_status === "BUDGET_EXCEEDED") {
+    return "worker exceeded the configured budget";
+  }
   const stderr = launchResult.stderr.trim();
   if (stderr) {
     return stderr;
@@ -154,6 +161,59 @@ function renderHandoff(
     "## Recommended Next Step",
     "",
     `- ${workerOutput.next_action}`,
+    "",
+  ].join("\n");
+}
+
+function renderTakeoverPacket(envelope: RunEnvelope, workerOutput: WorkerOutput): string {
+  const approvalCardId = String((envelope.approval_context.approval_card_id ?? "n/a") as string);
+  const evidenceDestination = `artifacts/runs/${envelope.run_id}/takeover/result.en.md`;
+  const blockedStep = workerOutput.open[0] ?? workerOutput.next_action;
+  const reason = workerOutput.blockers[0] ?? `worker returned ${workerOutput.status}`;
+  return [
+    "# Takeover Packet",
+    "",
+    "## Run Identity",
+    "",
+    `- job ID: ${envelope.job_id}`,
+    `- run ID: ${envelope.run_id}`,
+    `- freeze version: ${envelope.freeze_version}`,
+    `- story ID: ${envelope.story_id}`,
+    `- triggering run role: ${envelope.run_role}`,
+    `- triggering exit status: ${workerOutput.status}`,
+    "",
+    "## Blocked Step",
+    "",
+    `- exact blocked action: ${blockedStep}`,
+    `- reason automation cannot continue: ${reason}`,
+    "- current page, tool, or environment when relevant: generic-cli worker container",
+    "",
+    "## Required Human Action",
+    "",
+    `- concrete human task: ${workerOutput.next_action}`,
+    "- allowed action boundary: stay inside the active story, freeze, and run root",
+    "- forbidden actions: do not widen scope, mutate approvals, or bypass evidence capture",
+    "- expected completion signal: write the takeover outcome into the archived result record",
+    "",
+    "## Access And Approval Context",
+    "",
+    `- approval card ID: ${approvalCardId}`,
+    "- approved access method: local governed takeover",
+    "- credential handling rule: do not expose long-lived secrets in artifacts",
+    `- timeout or expiry condition: ${new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()}`,
+    "",
+    "## Expected Result",
+    "",
+    `- expected output: ${workerOutput.next_action}`,
+    `- artifact destination: ${evidenceDestination}`,
+    `- evidence destination: ${evidenceDestination}`,
+    "- resume criteria: result is archived under the same run_id takeover root and referenced by the manifest",
+    "",
+    "## Resume Notes",
+    "",
+    `- next loop role: ${envelope.run_role}`,
+    "- next command or check: review the takeover result and decide whether to resume or terminate",
+    "- rollback instruction if the takeover fails: stop the job and return control to owner review",
     "",
   ].join("\n");
 }
@@ -281,9 +341,11 @@ async function writeQaFallbackArtifacts(
 
 export class GenericCliAdapter {
   private readonly dockerLauncher: DockerWorkerLauncher;
+  private readonly capabilityGate: CapabilityGate;
 
   constructor(private readonly repoRoot: string) {
     this.dockerLauncher = new DockerWorkerLauncher(repoRoot);
+    this.capabilityGate = new CapabilityGate(repoRoot);
   }
 
   async execute(envelope: RunEnvelope): Promise<AdapterExecutionResult> {
@@ -295,25 +357,38 @@ export class GenericCliAdapter {
     const artifactIndexPath = join(runRoot, "metadata", "artifact-index.json");
     const handoffPath = join(runRoot, "reports", "handoff.en.md");
     await ensureHostWritableRunLayout(runRoot);
-    const materialization = await materializeContainerizedRunEnvelope(envelope);
-    const workerScript = workerScriptForRole(
-      materialization.runtime.container_paths.repo_path,
-      materialization.container_envelope.run_role,
-    );
+    let taskPacketPath = envelope.task_packet_path;
 
     const startedAtDate = new Date();
     let launchResult: DockerWorkerLaunchResult;
-    try {
-      launchResult = await this.dockerLauncher.launch({
-        run_role: materialization.container_envelope.run_role,
-        image: materialization.runtime.image,
-        worker_script_path: workerScript,
-        envelope_path: materialization.runtime.envelope_container_path,
-        runtime: materialization.runtime,
-        time_limits: envelope.time_limits,
-      });
-    } catch (error) {
-      launchResult = unexpectedLaunchResult(error);
+    const capabilityDecision = await this.capabilityGate.evaluate(envelope.requested_capabilities);
+    if (!capabilityDecision.allowed) {
+      launchResult = {
+        command: ["<capability-gate>", ...envelope.requested_capabilities],
+        exitCode: 1,
+        stdout: "",
+        stderr: capabilityDecision.reason ?? "capability gate rejected the launch",
+        failure_status: capabilityDecision.status ?? "FAILED_POLICY",
+      };
+    } else {
+      try {
+        const materialization = await materializeContainerizedRunEnvelope(envelope);
+        taskPacketPath = materialization.canonical_task_packet_path;
+        const workerScript = workerScriptForRole(
+          materialization.runtime.container_paths.repo_path,
+          materialization.container_envelope.run_role,
+        );
+        launchResult = await this.dockerLauncher.launch({
+          run_role: materialization.container_envelope.run_role,
+          image: materialization.runtime.image,
+          worker_script_path: workerScript,
+          envelope_path: materialization.runtime.envelope_container_path,
+          runtime: materialization.runtime,
+          time_limits: envelope.time_limits,
+        });
+      } catch (error) {
+        launchResult = unexpectedLaunchResult(error);
+      }
     }
     const exitCode = launchResult.exitCode;
     const stdout = launchResult.stdout;
@@ -388,6 +463,13 @@ export class GenericCliAdapter {
     const archivedHandoffPath = relativePosix(this.repoRoot, handoffPath);
     await writeJson(runResultPath, runResult);
     await writeText(handoffPath, renderHandoff(envelope, workerOutput.status, workerOutput, archivedHandoffPath));
+    const takeoverPacketPath =
+      workerOutput.status === "AWAITING_TAKEOVER"
+        ? join(runRoot, "takeover", "takeover-packet.en.md")
+        : null;
+    if (takeoverPacketPath !== null) {
+      await writeText(takeoverPacketPath, renderTakeoverPacket(envelope, workerOutput));
+    }
 
     const artifactIndex = await buildArtifactIndex(runRoot, envelope.run_id, envelope.run_role);
     await writeJson(artifactIndexPath, artifactIndex);
@@ -397,11 +479,12 @@ export class GenericCliAdapter {
       artifactIndex,
       workerOutput,
       runRoot,
-      taskPacketPath: materialization.canonical_task_packet_path,
+      taskPacketPath,
       runResultPath,
       artifactIndexPath,
       commandLogPath,
       handoffPath,
+      takeoverPacketPath,
     };
   }
 }
