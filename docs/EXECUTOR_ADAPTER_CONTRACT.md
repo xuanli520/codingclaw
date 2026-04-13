@@ -91,6 +91,11 @@ The envelope must include:
 
 Phase 1 implementations are required to support `builder` and `qa`. `review` remains optional until the review executor is enabled.
 
+Phase 1 role binding is profile-specific:
+
+- builder should use a Claude Code adapter profile
+- qa should use a Codex adapter profile
+
 ## Task Packet Boundary
 
 `task-packet.en.json` must follow [TASK_PACKET_TEMPLATE.en.md](TASK_PACKET_TEMPLATE.en.md).
@@ -201,4 +206,6 @@ Before a new adapter is accepted for live use, it must pass a consistency check 
 Phase 1 should freeze this contract first, then implement:
 
 1. one generic CLI adapter
-2. later adapters such as Codex or Aider
+2. one Claude Code builder adapter profile
+3. one Codex QA adapter profile
+4. later adapters such as Aider

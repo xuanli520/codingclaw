@@ -19,11 +19,11 @@ This document describes the runtime architecture of CodingClaw and the boundarie
    |- Policy Guard
    |- Budget Guard
    |- Channel Adapters
-   |- GUI Exception Gate
+   |- GUI Runtime Gate
    |
-   +------> [GUI Exception Plane]
-   |          |- Wuying Bridge
-   |          |- Takeover Session
+   +------> [Local GUI Runtime Plane]
+   |          |- Ubuntu Graphical Session
+   |          |- Headed Automation Session
    |
    v
 [Coding Loop Kernel]
@@ -34,8 +34,8 @@ This document describes the runtime architecture of CodingClaw and the boundarie
    |
    v
 [Execution Workers]
-   |- Builder Worker
-   |- QA Worker
+   |- Builder Worker (Claude Code)
+   |- QA Worker (Codex)
    |- Optional Review Worker
    |
    v
@@ -84,11 +84,11 @@ This document describes the runtime architecture of CodingClaw and the boundarie
 - serve as the only long-lived memory source
 - support recovery after crash, timeout, or handoff
 
-### GUI Exception Plane
+### Local GUI Runtime Plane
 
-- handle approved GUI-only interruptions
-- bridge human takeover back into the control shell
-- remain an exception path rather than a default execution surface
+- run approved headed browser or desktop automation on the same Ubuntu host
+- capture rendered evidence without a cloud desktop bridge
+- allow governed local takeover only when automation cannot proceed
 
 ## Runtime Objects
 
@@ -182,11 +182,11 @@ codingclaw/
 
 Phase 1 ships a single-node topology:
 
-- control shell on one host
+- control shell on one Ubuntu host with a graphical session
 - local or same-host Docker workers
 - one active job at a time
 - one active story at a time
-- GUI exception handling documented as a governed pause-and-takeover path
+- local GUI automation available on the same host when the story requires a real browser or desktop surface
 - local artifact volume plus SQLite or Postgres metadata
 
 This keeps the first release small enough to verify end-to-end governance before scaling scheduler complexity.

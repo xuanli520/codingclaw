@@ -4,6 +4,8 @@
 
 The Builder implements one approved story within the boundary of the active Contract Freeze.
 
+Phase 1 binds the builder role to the Claude Code execution profile.
+
 ## Inputs
 
 The Builder reads:

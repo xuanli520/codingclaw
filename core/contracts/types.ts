@@ -57,6 +57,13 @@ export interface StoryContract {
   escalation_rules: string[];
 }
 
+export interface CredentialInjectionRequest {
+  secret_handle: string;
+  credential_alias: string;
+  allowed_host_patterns: string[];
+  injection_mode: "env";
+}
+
 export interface TaskPacket {
   job_id: string;
   freeze_id: string;
@@ -79,7 +86,49 @@ export interface TaskPacket {
   approval_context: Record<string, unknown>;
   previous_handoff_path: string;
   requested_capabilities: string[];
+  credential_injection_requests?: CredentialInjectionRequest[];
   story: StoryContract;
+}
+
+export type ContainerMountName =
+  | "repo"
+  | "repo-job-root"
+  | "state"
+  | "artifacts"
+  | "run-artifacts"
+  | "repo-run-artifacts"
+  | "task-packet"
+  | "repo-task-packet"
+  | "runtime-home"
+  | "repo-runtime-home"
+  | "cache";
+
+export interface ContainerPathMount {
+  name: ContainerMountName;
+  host_path: string;
+  container_path: string;
+  read_only: boolean;
+}
+
+export interface ContainerPathMap {
+  repo_path: string;
+  state_path: string;
+  artifact_path: string;
+  runtime_home: string;
+  task_packet_path: string;
+  previous_handoff_path: string;
+  approval_snapshot_path: string;
+  trace_context: Record<string, unknown>;
+}
+
+export interface ContainerRuntimeConfig {
+  runtime: "docker";
+  image: string;
+  workdir: string;
+  envelope_host_path: string;
+  envelope_container_path: string;
+  mounts: ContainerPathMount[];
+  container_paths: ContainerPathMap;
 }
 
 export interface RunEnvelope {
@@ -106,6 +155,7 @@ export interface RunEnvelope {
   approval_snapshot_path: string;
   trace_context: Record<string, unknown>;
   requested_capabilities: string[];
+  container_runtime?: ContainerRuntimeConfig | null;
 }
 
 export interface WorkerOutput {
@@ -282,6 +332,20 @@ export interface LoopMetricsFile {
   runs: LoopMetricEntry[];
 }
 
+export interface ApprovalRequestSnapshot {
+  request_id: string;
+  job_id: string;
+  story_id: string;
+  run_id: string;
+  run_role: RunRole;
+  action_summary: string;
+  reason: string;
+  risk_level: string;
+  requested_capability: string;
+  suggested_alternatives: string[];
+  timeout_at: string;
+}
+
 export interface ApprovalCardSnapshot {
   job_id: string;
   card_id: string;
@@ -296,6 +360,17 @@ export interface ApprovalCardSnapshot {
   timeout_at: string;
   created_at: string;
   evidence_refs: string[];
+  approval_request?: ApprovalRequestSnapshot | null;
+  recovery_context?: {
+    last_exit_reason: RunExitStatus;
+    current_freeze_version: string;
+    current_story: string;
+    latest_evidence_path: string;
+    recommended_next_action: string;
+    resume_gate: "owner" | "takeover";
+    paused_run_id: string;
+    paused_run_role: RunRole;
+  } | null;
 }
 
 export interface ApprovalDecisionReceipt {
@@ -403,11 +478,12 @@ export interface JobManifestApprovalRecord {
   card_state: ApprovalCardState;
   card_type: string;
   requested_action: string;
-  decision: string;
+  decision: string | null;
   snapshot_path: string;
-  decision_path: string;
+  decision_path: string | null;
   summary_zh_ref: string;
-  decided_at: string;
+  decided_at: string | null;
+  approval_request?: ApprovalRequestSnapshot | null;
 }
 
 export interface JobManifestArtifactRecord {
@@ -458,4 +534,5 @@ export interface AdapterExecutionResult {
   artifactIndexPath: string;
   commandLogPath: string;
   handoffPath: string;
+  takeoverPacketPath: string | null;
 }

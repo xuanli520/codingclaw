@@ -81,7 +81,7 @@ def _default_mandatory_statuses(exit_status: str) -> dict[str, str]:
 
 def _expected_artifacts(scenario: Scenario) -> list[str]:
     artifacts = [
-        "task-packet.json",
+        "metadata/task-packet.en.json",
         "logs/command-log.txt",
         "metadata/run-result.json",
         "metadata/trace-index.json",
@@ -178,7 +178,7 @@ def materialize_scenario(root: Path, scenario: Scenario) -> dict:
         freeze_json["base_commit"] = "tampered-commit"
         _write_json(freeze_json_path, freeze_json)
 
-    _write_json(run_root / "task-packet.json", task_packet)
+    _write_json(run_root / "metadata" / "task-packet.en.json", task_packet)
 
     acceptance_statuses = scenario.acceptance_statuses or _default_acceptance_statuses(story, scenario.exit_status)
     mandatory_check_statuses = scenario.mandatory_check_statuses or _default_mandatory_statuses(scenario.exit_status)
@@ -241,11 +241,14 @@ def materialize_scenario(root: Path, scenario: Scenario) -> dict:
             "card_state": approval_card["status"],
             "card_type": "approval",
             "requested_action": approval_card["requested_action"],
-            "decision": "",
+            "decision": None,
             "snapshot_path": f"artifacts/runs/{scenario.run_id}/approvals/{scenario.approval_card_id}/approval-card.json",
-            "decision_path": "",
+            "decision_path": None,
             "summary_zh_ref": f"artifacts/runs/{scenario.run_id}/approvals/{scenario.approval_card_id}/summary.zh.md",
-            "decided_at": "",
+            "decided_at": None,
+            "waiting_on": "owner" if scenario.exit_status != "AWAITING_TAKEOVER" else "takeover",
+            "resume_action": approval_card["requested_action"],
+            "timeout_at": "2026-04-09T00:00:00Z",
         }
         if scenario.approval_decided:
             decision_payload = build_approval_card(
@@ -303,7 +306,7 @@ def materialize_scenario(root: Path, scenario: Scenario) -> dict:
         freeze_checksum=sha256_file(freeze_path),
         run_result=run_result,
         run_root=f"artifacts/runs/{scenario.run_id}",
-        task_packet_path=f"artifacts/runs/{scenario.run_id}/task-packet.json",
+        task_packet_path=f"artifacts/runs/{scenario.run_id}/metadata/task-packet.en.json",
         artifact_index_path=f"artifacts/runs/{scenario.run_id}/metadata/artifact-index.json",
         handoff_path=f"artifacts/runs/{scenario.run_id}/reports/handoff.en.md",
         active_story=story,
@@ -334,7 +337,7 @@ def materialize_scenario(root: Path, scenario: Scenario) -> dict:
         "freeze_path": freeze_path,
         "freeze_json_path": freeze_json_path,
         "freeze_checksum_path": freeze_checksum_path,
-        "task_packet_path": run_root / "task-packet.json",
+        "task_packet_path": run_root / "metadata" / "task-packet.en.json",
         "run_result_path": run_root / "metadata" / "run-result.json",
         "trace_index_path": run_root / "metadata" / "trace-index.json",
         "artifact_index_path": run_root / "metadata" / "artifact-index.json",

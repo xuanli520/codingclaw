@@ -41,7 +41,7 @@ CodingClaw is not:
 
 ### Control Shell
 
-The control shell accepts Chinese commands, normalizes requirements, manages approval gates, budgets, policy guards, and dispatches loop work through adapters governed by [EXECUTOR_ADAPTER_CONTRACT.md](EXECUTOR_ADAPTER_CONTRACT.md).
+The target control shell accepts Chinese commands, normalizes requirements, manages approval gates, budgets, policy guards, and dispatches loop work through adapters governed by [EXECUTOR_ADAPTER_CONTRACT.md](EXECUTOR_ADAPTER_CONTRACT.md). The current Phase 1 local slice exposes a repository-invoked `bun run phase1` proof command instead of the live intake surface.
 
 ### Coding Loop Kernel
 
@@ -55,9 +55,9 @@ Workers run in isolated environments. Builder produces implementation artifacts.
 
 This plane stores all long-lived state, reports, logs, evidence, sessions, checksums, and manifests required for replay and audit.
 
-### GUI Exception Plane
+### Local GUI Runtime Plane
 
-Aliyun Wuying Desktop is reserved for GUI-only tasks, human takeover, and assisted recovery. It is not a primary coding surface.
+A single Ubuntu host with a graphical session is the planned GUI execution surface. The current Phase 1 local slice records takeover contracts and waiting states, but it does not yet enable live headed browser or desktop automation in the active adapter profile.
 
 ## Mandatory Lifecycle
 
@@ -71,7 +71,7 @@ INTAKE
  -> STORY_QUEUE_READY
  -> BUILD_EXECUTION
  -> QA_VALIDATION
- -> FIXBACK(optional)
+ -> FIXBACK(optional, manual in the current Phase 1 local slice)
  -> FINAL_APPROVAL(optional)
  -> ARCHIVE
 ```
@@ -122,11 +122,12 @@ At archive finalization:
 
 Phase 1 is the minimum working product. It includes:
 
-- one Chinese mobile entry channel
+- one repository-invoked local control command for the fixed proof slice
 - one control shell
 - one generic CLI adapter
-- one builder worker
-- one QA worker
+- one Claude Code builder worker
+- one Codex QA worker
+- takeover packet and waiting-state support for future local GUI execution, without live browser or desktop automation yet
 - contract binding to `base_commit`
 - traceability from story to acceptance to QA verdict
 - local artifact archival and checksums
@@ -138,7 +139,9 @@ Phase 1 excludes:
 - multi-channel concurrency
 - multi-adapter parallel execution
 - mandatory review executor in the live path
-- Wuying automation
+- live Chinese mobile intake
+- live local browser or desktop automation
+- cloud desktop bridges or vendor-specific remote desktop orchestration
 - dashboards
 - historical job reuse
 - production-scale multi-tenant scheduling
@@ -158,5 +161,5 @@ Phase 1 excludes:
 - [APPROVAL_CARD_SPEC.md](APPROVAL_CARD_SPEC.md)
 - [REVIEW_CONTRACT.en.md](REVIEW_CONTRACT.en.md)
 - [ARTIFACT_LAYOUT_SPEC.md](ARTIFACT_LAYOUT_SPEC.md)
-- [WUYING_INTEGRATION_PLAN.md](WUYING_INTEGRATION_PLAN.md)
+- [UBUNTU_GUI_RUNTIME_PLAN.md](UBUNTU_GUI_RUNTIME_PLAN.md)
 - [TAKEOVER_PACKET_TEMPLATE.en.md](TAKEOVER_PACKET_TEMPLATE.en.md)

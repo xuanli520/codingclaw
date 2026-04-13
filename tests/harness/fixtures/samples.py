@@ -269,14 +269,23 @@ def build_job_manifest(
     approval_records: list[dict],
 ) -> dict:
     job_state = map_run_exit_to_job_state(run_result["status"])
+    paused = job_state in {"AWAITING_OWNER", "AWAITING_TAKEOVER"}
+    waiting_on = "owner" if job_state == "AWAITING_OWNER" else ("takeover" if job_state == "AWAITING_TAKEOVER" else None)
+    latest_approval = approval_records[-1] if paused and approval_records else None
     pause_context = {
-        "is_paused": job_state in {"AWAITING_OWNER", "AWAITING_TAKEOVER"},
-        "pause_reason": run_result["status"] if job_state in {"AWAITING_OWNER", "AWAITING_TAKEOVER"} else "",
-        "waiting_on": "owner" if job_state == "AWAITING_OWNER" else ("takeover" if job_state == "AWAITING_TAKEOVER" else ""),
-        "resume_action": "resume-run" if job_state in {"AWAITING_OWNER", "AWAITING_TAKEOVER"} else "",
-        "paused_at": "2026-04-08T00:05:00Z" if job_state in {"AWAITING_OWNER", "AWAITING_TAKEOVER"} else "",
-        "related_card_id": approval_records[-1]["card_id"] if approval_records else "",
-        "expires_at": "",
+        "is_paused": paused,
+        "pause_reason": run_result["status"] if paused else None,
+        "waiting_on": (latest_approval or {}).get("waiting_on", waiting_on) if paused else None,
+        "resume_action": (
+            (latest_approval or {}).get("resume_action")
+            or (latest_approval or {}).get("requested_action")
+            or ("Wait for owner input before continuing." if waiting_on == "owner" else "Wait for takeover before continuing.")
+        )
+        if paused
+        else None,
+        "paused_at": "2026-04-08T00:05:00Z" if paused else None,
+        "related_card_id": latest_approval["card_id"] if latest_approval else None,
+        "expires_at": (latest_approval or {}).get("timeout_at") if paused else None,
     }
     return {
         "job_id": job_id,

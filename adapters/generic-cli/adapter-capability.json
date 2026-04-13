@@ -17,8 +17,8 @@
     "filesystem_write": {
       "mode": "allow",
       "scope": [
-        "state",
-        "artifacts",
+        "repo",
+        "run-artifacts",
         "runtime-home"
       ],
       "cost_level": "low",
@@ -28,10 +28,10 @@
     "shell_command": {
       "mode": "allow",
       "scope": [
-        "local-worker-command"
+        "docker-worker-command"
       ],
       "cost_level": "low",
-      "risk_level": "medium",
+      "risk_level": "high",
       "approval_requirement": "none"
     },
     "git": {
@@ -58,11 +58,13 @@
       "approval_requirement": "not-supported"
     },
     "container_control": {
-      "mode": "deny",
-      "scope": [],
-      "cost_level": "none",
-      "risk_level": "low",
-      "approval_requirement": "not-supported"
+      "mode": "allow",
+      "scope": [
+        "single-node-local-worker-containers"
+      ],
+      "cost_level": "low",
+      "risk_level": "high",
+      "approval_requirement": "none"
     },
     "screenshot": {
       "mode": "deny",

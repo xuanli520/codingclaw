@@ -72,7 +72,7 @@ The task packet must:
 
 - the loop launches only one role at a time
 - the worker may be builder, QA, or review
-- Phase 1 requires builder and QA only. Review remains optional until a later phase enables it.
+- Phase 1 requires builder and QA only. Builder is expected to run through Claude Code, QA through Codex. Review remains optional until a later phase enables it.
 - workers must return standard output objects and a standard exit status
 - unapproved privileged actions must interrupt execution and return approval-needed status
 
@@ -156,4 +156,5 @@ After each run, the loop must update:
 
 - fixback should usually remain within the same story
 - fixback must not silently expand scope
-- Phase 1 should cap fixback at 2 or 3 rounds per story
+- the current Phase 1 local slice stops at `FIXBACK_PENDING` and requires an explicit next-step decision before another run is scheduled
+- an automated fixback retry ceiling applies only after multi-round fixback scheduling is implemented

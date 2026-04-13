@@ -1,5 +1,7 @@
-import { join } from "node:path";
+import { copyFile, readdir, readlink, symlink } from "node:fs/promises";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { GenericCliAdapter } from "../../adapters/generic-cli/adapter.ts";
+import { buildArtifactIndex } from "../../ops/archive/artifact-index.ts";
 import { writeApprovalArchive } from "../../ops/archive/approvals.ts";
 import {
   buildEnvironmentSnapshotMetadata,
@@ -25,6 +27,7 @@ import {
   readJson,
   readText,
   sha256Text,
+  toPosixPath,
   uniqueStrings,
   writeJson,
   writeText,
@@ -33,15 +36,18 @@ import type {
   AdapterExecutionResult,
   ApprovalCardSnapshot,
   ApprovalDecisionReceipt,
+  ApprovalRequestSnapshot,
   ChecksumRecord,
   ContractFreezeMetadata,
   JobManifest,
   JobManifestApprovalRecord,
+  JobManifestPauseContext,
   JobManifestRunRecord,
   JobManifestStoryRecord,
   JobState,
   RunResult,
   RunEnvelope,
+  RunExitStatus,
   RunRole,
   TaskPacket,
 } from "../contracts/types.ts";
@@ -50,6 +56,14 @@ const BUILDER_EXPECTED_ARTIFACTS = [
   "logs/command-log.txt",
   "logs/worker.log",
   "metadata/task-packet.en.json",
+  "metadata/state/active-story.json",
+  "metadata/state/decisions.en.md",
+  "metadata/state/handoff.en.md",
+  "metadata/state/loop-metrics.json",
+  "metadata/state/progress.en.md",
+  "metadata/state/risk-register.en.md",
+  "metadata/state/story-queue.json",
+  "metadata/state/trace-index.json",
   "metadata/timings.json",
   "metadata/run-result.json",
   "metadata/artifact-index.json",
@@ -73,6 +87,14 @@ const QA_EXPECTED_ARTIFACTS = [
   "logs/command-log.txt",
   "logs/worker.log",
   "metadata/task-packet.en.json",
+  "metadata/state/active-story.json",
+  "metadata/state/decisions.en.md",
+  "metadata/state/handoff.en.md",
+  "metadata/state/loop-metrics.json",
+  "metadata/state/progress.en.md",
+  "metadata/state/risk-register.en.md",
+  "metadata/state/story-queue.json",
+  "metadata/state/trace-index.json",
   "metadata/timings.json",
   "metadata/run-result.json",
   "metadata/artifact-index.json",
@@ -107,19 +129,17 @@ function roleArtifacts(runRole: RunRole): { expectedArtifacts: string[]; verific
   };
 }
 
-function buildApprovalDecision(card: ApprovalCardSnapshot): ApprovalDecisionReceipt {
-  return {
-    job_id: card.job_id,
-    card_id: card.card_id,
-    card_type: card.card_type,
-    story_id: card.story_id,
-    freeze_version: card.freeze_version,
-    decision: "approve",
-    actor: "local-owner",
-    decided_at: "2026-04-08T00:00:00Z",
-    card_state: "DECIDED",
-    requested_action: card.requested_action,
-  };
+async function loadApprovalDecision(repoRoot: string, card: ApprovalCardSnapshot): Promise<ApprovalDecisionReceipt> {
+  const decision = await readJson<ApprovalDecisionReceipt>(
+    join(repoRoot, "control", "fixtures", "phase1-local-approval-decision.json"),
+  );
+  if (decision.job_id !== card.job_id || decision.card_id !== card.card_id) {
+    throw new Error("phase1 approval decision fixture does not match the plan approval card");
+  }
+  if (decision.card_state !== "DECIDED") {
+    throw new Error("phase1 approval decision fixture must be decided before freeze generation");
+  }
+  return decision;
 }
 
 async function loadAdapterInfo(repoRoot: string): Promise<{ adapter_id: string; adapter_version: string }> {
@@ -140,6 +160,47 @@ async function buildDependencySnapshotDigest(repoRoot: string): Promise<string> 
   return "absent";
 }
 
+const JOB_REPO_SNAPSHOT_EXCLUDES = new Set([".omx", "jobs", "state"]);
+
+function assertSnapshotSymlinkTarget(sourceRoot: string, sourcePath: string, targetPath: string): string {
+  const resolvedTarget = resolve(dirname(sourcePath), targetPath);
+  const relativeTarget = relative(resolve(sourceRoot), resolvedTarget);
+  if (relativeTarget === "" || (!relativeTarget.startsWith("..") && !isAbsolute(relativeTarget))) {
+    return targetPath;
+  }
+  throw new Error(`repo snapshot symlink escaped the source repo: ${sourcePath}`);
+}
+
+async function copyRepoSnapshot(sourceRoot: string, targetRoot: string, relativePath = ""): Promise<void> {
+  const sourceDir = relativePath.length === 0 ? sourceRoot : join(sourceRoot, relativePath);
+  const entries = await readdir(sourceDir, { withFileTypes: true });
+  for (const entry of entries) {
+    if (relativePath.length === 0 && JOB_REPO_SNAPSHOT_EXCLUDES.has(entry.name)) {
+      continue;
+    }
+    const childRelativePath = relativePath.length === 0 ? entry.name : join(relativePath, entry.name);
+    const sourcePath = join(sourceRoot, childRelativePath);
+    const targetPath = join(targetRoot, childRelativePath);
+    if (entry.isDirectory()) {
+      await ensureDir(targetPath);
+      await copyRepoSnapshot(sourceRoot, targetRoot, childRelativePath);
+      continue;
+    }
+    if (entry.isSymbolicLink()) {
+      await ensureDir(dirname(targetPath));
+      await symlink(assertSnapshotSymlinkTarget(sourceRoot, sourcePath, await readlink(sourcePath)), targetPath);
+      continue;
+    }
+    await ensureDir(dirname(targetPath));
+    await copyFile(sourcePath, targetPath);
+  }
+}
+
+async function stageJobRepoWorkspace(repoRoot: string, workerRepoRoot: string): Promise<void> {
+  await ensureDir(workerRepoRoot);
+  await copyRepoSnapshot(repoRoot, workerRepoRoot);
+}
+
 async function assertFreshJobRoot(layout: ReturnType<typeof resolveJobRootLayout>): Promise<void> {
   if (!(await pathExists(layout.jobRoot))) {
     return;
@@ -156,16 +217,22 @@ async function assertFreshJobRoot(layout: ReturnType<typeof resolveJobRootLayout
 
 async function buildTaskPacket(
   repoRoot: string,
+  baseCommit: string,
   runRole: RunRole,
   runId: string,
   stateRoot: string,
   artifactRoot: string,
   runtimeHome: string,
   previousHandoffPath: string,
+  persist = true,
 ): Promise<TaskPacket> {
   const taskPacketPath = join(artifactRoot, "metadata", "task-packet.en.json");
+  const normalizedRepoRoot = toPosixPath(repoRoot);
+  const normalizedStateRoot = toPosixPath(stateRoot);
+  const normalizedArtifactRoot = toPosixPath(artifactRoot);
+  const normalizedRuntimeHome = toPosixPath(runtimeHome);
+  const normalizedPreviousHandoffPath = previousHandoffPath.length > 0 ? toPosixPath(previousHandoffPath) : "";
   const { expectedArtifacts, verificationTargets } = roleArtifacts(runRole);
-  const baseCommit = detectBaseCommit(repoRoot);
 
   const packetWithoutChecksum = await materializeJsonTemplate<TaskPacket>(
     join(repoRoot, "control", "fixtures", "phase1-local-task-packet.en.json"),
@@ -173,24 +240,26 @@ async function buildTaskPacket(
       __RUN_ROLE__: runRole,
       __RUN_ATTEMPT__: 1,
       __RUN_ID__: runId,
-      __REPO_PATH__: repoRoot,
+      __REPO_PATH__: normalizedRepoRoot,
       __BASE_COMMIT__: baseCommit,
-      __STATE_PATH__: stateRoot,
-      __ARTIFACT_PATH__: artifactRoot,
-      __RUNTIME_HOME__: runtimeHome,
+      __STATE_PATH__: normalizedStateRoot,
+      __ARTIFACT_PATH__: normalizedArtifactRoot,
+      __RUNTIME_HOME__: normalizedRuntimeHome,
       __TASK_PACKET_SHA256__: "",
-      __PREVIOUS_HANDOFF_PATH__: previousHandoffPath,
+      __PREVIOUS_HANDOFF_PATH__: normalizedPreviousHandoffPath,
       __VERIFICATION_TARGETS__: verificationTargets,
       __EXPECTED_ARTIFACTS__: expectedArtifacts,
     },
   );
 
-  await ensureDir(join(artifactRoot, "metadata"));
   const finalPacket: TaskPacket = {
     ...packetWithoutChecksum,
     task_packet_sha256: taskPacketDigest(packetWithoutChecksum),
   };
-  await writeJson(taskPacketPath, finalPacket);
+  if (persist) {
+    await ensureDir(join(artifactRoot, "metadata"));
+    await writeJson(taskPacketPath, finalPacket);
+  }
 
   return finalPacket;
 }
@@ -202,28 +271,46 @@ function taskPacketDigest(taskPacket: TaskPacket): string {
 async function buildRunEnvelope(
   repoRoot: string,
   taskPacket: TaskPacket,
+  stateRoot: string,
+  artifactRoot: string,
+  runtimeHome: string,
   previousHandoffPath: string,
   approvalSnapshotPath: string,
   traceContext: Record<string, unknown>,
 ): Promise<RunEnvelope> {
-  return materializeJsonTemplate<RunEnvelope>(
+  const normalizedRepoRoot = toPosixPath(repoRoot);
+  const normalizedStateRoot = toPosixPath(stateRoot);
+  const normalizedArtifactRoot = toPosixPath(artifactRoot);
+  const normalizedRuntimeHome = toPosixPath(runtimeHome);
+  const normalizedTaskPacketPath = toPosixPath(join(artifactRoot, "metadata", "task-packet.en.json"));
+  const normalizedPreviousHandoffPath = previousHandoffPath.length > 0 ? toPosixPath(previousHandoffPath) : "";
+  const normalizedApprovalSnapshotPath = toPosixPath(approvalSnapshotPath);
+  const envelope = await materializeJsonTemplate<RunEnvelope>(
     join(repoRoot, "control", "fixtures", "phase1-local-run-envelope.json"),
     {
       __RUN_ID__: taskPacket.run_id,
       __RUN_ROLE__: taskPacket.run_role,
       __RUN_ATTEMPT__: taskPacket.run_attempt,
-      __REPO_PATH__: taskPacket.repo_path,
+      __REPO_PATH__: normalizedRepoRoot,
       __BASE_COMMIT__: taskPacket.base_commit,
-      __STATE_PATH__: taskPacket.state_path,
-      __ARTIFACT_PATH__: taskPacket.artifact_path,
-      __RUNTIME_HOME__: taskPacket.runtime_home,
-      __TASK_PACKET_PATH__: join(taskPacket.artifact_path, "metadata", "task-packet.en.json"),
+      __STATE_PATH__: normalizedStateRoot,
+      __ARTIFACT_PATH__: normalizedArtifactRoot,
+      __RUNTIME_HOME__: normalizedRuntimeHome,
+      __TASK_PACKET_PATH__: normalizedTaskPacketPath,
       __TASK_PACKET_SHA256__: taskPacket.task_packet_sha256,
-      __PREVIOUS_HANDOFF_PATH__: previousHandoffPath,
-      __APPROVAL_SNAPSHOT_PATH__: approvalSnapshotPath,
+      __PREVIOUS_HANDOFF_PATH__: normalizedPreviousHandoffPath,
+      __APPROVAL_SNAPSHOT_PATH__: normalizedApprovalSnapshotPath,
       __TRACE_CONTEXT__: traceContext,
     },
   );
+
+  return {
+    ...envelope,
+    budget_limits: taskPacket.budget_limits,
+    time_limits: taskPacket.time_limits,
+    requested_capabilities: taskPacket.requested_capabilities,
+    container_runtime: null,
+  };
 }
 
 async function normalizeRunArtifacts(
@@ -316,6 +403,20 @@ function buildFreezeMetadata(
   };
 }
 
+function approvalRelativePaths(
+  layout: ReturnType<typeof resolveJobRootLayout>,
+  approvalRecord: Awaited<ReturnType<typeof writeApprovalArchive>>,
+): string[] {
+  const relativePaths = [
+    layout.relativeToJobRoot(approvalRecord.snapshot_path),
+    layout.relativeToJobRoot(approvalRecord.summary_path),
+  ];
+  if (approvalRecord.decision_path !== null) {
+    relativePaths.push(layout.relativeToJobRoot(approvalRecord.decision_path));
+  }
+  return uniqueStrings(relativePaths);
+}
+
 function buildManifestApprovalRecord(
   layout: ReturnType<typeof resolveJobRootLayout>,
   approvalRecord: Awaited<ReturnType<typeof writeApprovalArchive>>,
@@ -327,9 +428,11 @@ function buildManifestApprovalRecord(
     requested_action: approvalRecord.requested_action,
     decision: approvalRecord.decision,
     snapshot_path: layout.relativeToJobRoot(approvalRecord.snapshot_path),
-    decision_path: layout.relativeToJobRoot(approvalRecord.decision_path),
+    decision_path:
+      approvalRecord.decision_path === null ? null : layout.relativeToJobRoot(approvalRecord.decision_path),
     summary_zh_ref: layout.relativeToJobRoot(approvalRecord.summary_path),
     decided_at: approvalRecord.decided_at,
+    ...(approvalRecord.approval_request === null ? {} : { approval_request: approvalRecord.approval_request }),
   };
 }
 
@@ -347,7 +450,8 @@ function buildManifestRunRecords(
     run_result_path: layout.relativeToJobRoot(execution.runResultPath),
     artifact_index_path: layout.relativeToJobRoot(execution.artifactIndexPath),
     handoff_path: layout.relativeToJobRoot(execution.handoffPath),
-    takeover_packet_path: null,
+    takeover_packet_path:
+      execution.takeoverPacketPath === null ? null : layout.relativeToJobRoot(execution.takeoverPacketPath),
     started_at: execution.runResult.started_at,
     ended_at: execution.runResult.ended_at,
   }));
@@ -385,6 +489,258 @@ function buildManifestStoryRecord(
   };
 }
 
+function emptyPauseContext(): JobManifestPauseContext {
+  return {
+    is_paused: false,
+    pause_reason: null,
+    waiting_on: null,
+    resume_action: null,
+    paused_at: null,
+    related_card_id: null,
+    expires_at: null,
+  };
+}
+
+function waitingOnForState(state: JobState): string | null {
+  if (state === "AWAITING_OWNER") {
+    return "owner";
+  }
+  if (state === "AWAITING_TAKEOVER") {
+    return "takeover";
+  }
+  return null;
+}
+
+function latestEvidencePath(execution: AdapterExecutionResult): string {
+  const relativePath = execution.workerOutput.evidence_paths[0] ?? "reports/handoff.en.md";
+  return `artifacts/runs/${execution.runResult.run_id}/${relativePath}`;
+}
+
+function recoveryRiskLevel(status: RunExitStatus): string {
+  if (
+    status === "FAILED_POLICY" ||
+    status === "FAILED_EXECUTION" ||
+    status === "FAILED_INFRA" ||
+    status === "TIMEOUT" ||
+    status === "BUDGET_EXCEEDED"
+  ) {
+    return "high";
+  }
+  return "medium";
+}
+
+function recoveryRequestedAction(status: RunExitStatus, resumeGate: "owner" | "takeover"): string {
+  if (status === "AWAITING_APPROVAL") {
+    return "Review the executor approval request before continuing.";
+  }
+  if (status === "AWAITING_CREDENTIALS") {
+    return "Provide the required credential or choose an alternative before continuing.";
+  }
+  if (resumeGate === "takeover") {
+    return "Review the blocked run and trigger takeover before continuing.";
+  }
+  return "Review the blocked run and decide how to resume the job.";
+}
+
+function recoveryCandidateActions(status: RunExitStatus, resumeGate: "owner" | "takeover"): string[] {
+  if (status === "AWAITING_APPROVAL") {
+    return ["approve requested action", "request revision", "trigger takeover"];
+  }
+  if (status === "AWAITING_CREDENTIALS") {
+    return ["provide credentials", "request revision", "trigger takeover"];
+  }
+  if (resumeGate === "takeover") {
+    return ["trigger takeover", "resume job", "request revision"];
+  }
+  return ["resume job", "request revision", "trigger takeover"];
+}
+
+function approvalRequestReason(execution: AdapterExecutionResult): string {
+  const blocker = execution.workerOutput.blockers.find((value) => value.trim().length > 0);
+  if (blocker !== undefined) {
+    return blocker;
+  }
+  if (execution.workerOutput.next_action.trim().length > 0) {
+    return execution.workerOutput.next_action;
+  }
+  return `worker reported ${execution.runResult.status}`;
+}
+
+function buildRecoveryApprovalRequest(
+  taskPacket: TaskPacket,
+  execution: AdapterExecutionResult,
+  timeoutAt: string,
+  riskLevel: string,
+): ApprovalRequestSnapshot | null {
+  if (execution.runResult.status === "AWAITING_APPROVAL") {
+    return {
+      request_id: `approval-request-${execution.runResult.run_id}`,
+      job_id: taskPacket.job_id,
+      story_id: taskPacket.story.story_id,
+      run_id: execution.runResult.run_id,
+      run_role: execution.runResult.run_role,
+      action_summary: `${execution.runResult.run_role} requested owner approval before continuing.`,
+      reason: approvalRequestReason(execution),
+      risk_level: riskLevel,
+      requested_capability: "interactive_approval",
+      suggested_alternatives: ["request revision", "trigger takeover"],
+      timeout_at: timeoutAt,
+    };
+  }
+  if (execution.runResult.status === "AWAITING_CREDENTIALS") {
+    return {
+      request_id: `approval-request-${execution.runResult.run_id}`,
+      job_id: taskPacket.job_id,
+      story_id: taskPacket.story.story_id,
+      run_id: execution.runResult.run_id,
+      run_role: execution.runResult.run_role,
+      action_summary: `${execution.runResult.run_role} requested credentials before continuing.`,
+      reason: approvalRequestReason(execution),
+      risk_level: riskLevel,
+      requested_capability: "secret_injection",
+      suggested_alternatives: ["continue without credentials", "request revision", "trigger takeover"],
+      timeout_at: timeoutAt,
+    };
+  }
+  return null;
+}
+
+function buildRecoveryCard(taskPacket: TaskPacket, execution: AdapterExecutionResult): ApprovalCardSnapshot {
+  const jobState = mapRunExitToJobState(execution.runResult.status, execution.runResult.run_role);
+  const resumeGate = jobState === "AWAITING_TAKEOVER" ? "takeover" : "owner";
+  const latestEvidenceRef = latestEvidencePath(execution);
+  const timeoutAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+  const riskLevel = recoveryRiskLevel(execution.runResult.status);
+  const approvalRequest = buildRecoveryApprovalRequest(taskPacket, execution, timeoutAt, riskLevel);
+  return {
+    job_id: taskPacket.job_id,
+    card_id: `card-recovery-${execution.runResult.run_id}`,
+    card_state: "PENDING",
+    card_type: "recovery",
+    story_id: taskPacket.story.story_id,
+    freeze_version: taskPacket.freeze_version,
+    risk_level: riskLevel,
+    summary_zh: `运行 ${execution.runResult.run_id} 已以 ${execution.runResult.status} 停止，当前故事需要${resumeGate === "takeover" ? "接管" : "人工决策"}后继续。`,
+    requested_action: recoveryRequestedAction(execution.runResult.status, resumeGate),
+    candidate_actions: recoveryCandidateActions(execution.runResult.status, resumeGate),
+    timeout_at: timeoutAt,
+    created_at: execution.runResult.ended_at,
+    evidence_refs: uniqueStrings([
+      latestEvidenceRef,
+      `artifacts/runs/${execution.runResult.run_id}/metadata/run-result.json`,
+      `artifacts/runs/${execution.runResult.run_id}/reports/handoff.en.md`,
+    ]),
+    ...(approvalRequest === null ? {} : { approval_request: approvalRequest }),
+    recovery_context: {
+      last_exit_reason: execution.runResult.status,
+      current_freeze_version: taskPacket.freeze_version,
+      current_story: taskPacket.story.story_id,
+      latest_evidence_path: latestEvidenceRef,
+      recommended_next_action: execution.workerOutput.next_action,
+      resume_gate: resumeGate,
+      paused_run_id: execution.runResult.run_id,
+      paused_run_role: execution.runResult.run_role,
+    },
+  };
+}
+
+async function writeRecoveryTakeoverPacket(
+  taskPacket: TaskPacket,
+  execution: AdapterExecutionResult,
+  approvalRecord: Awaited<ReturnType<typeof writeApprovalArchive>>,
+): Promise<void> {
+  const takeoverPacketPath = execution.takeoverPacketPath ?? join(execution.runRoot, "takeover", "takeover-packet.en.md");
+  execution.takeoverPacketPath = takeoverPacketPath;
+  await writeText(
+    takeoverPacketPath,
+    [
+      "# Takeover Packet",
+      "",
+      "## Run Identity",
+      "",
+      `- job ID: ${taskPacket.job_id}`,
+      `- run ID: ${execution.runResult.run_id}`,
+      `- freeze version: ${taskPacket.freeze_version}`,
+      `- story ID: ${taskPacket.story.story_id}`,
+      `- triggering run role: ${execution.runResult.run_role}`,
+      `- triggering exit status: ${execution.runResult.status}`,
+      "",
+      "## Blocked Step",
+      "",
+      `- exact blocked action: ${execution.workerOutput.open[0] ?? execution.workerOutput.next_action}`,
+      `- reason automation cannot continue: ${approvalRequestReason(execution)}`,
+      "- current page, tool, or environment when relevant: generic-cli worker container",
+      "",
+      "## Required Human Action",
+      "",
+      `- concrete human task: ${execution.workerOutput.next_action}`,
+      "- allowed action boundary: stay inside the active story, freeze, and archived run root",
+      "- forbidden actions: do not widen scope, rewrite approvals, or bypass evidence capture",
+      "- expected completion signal: archive the takeover outcome under the same run_id takeover root",
+      "",
+      "## Access And Approval Context",
+      "",
+      `- approval card ID: ${approvalRecord.card_id}`,
+      "- approved access method: governed local takeover",
+      "- credential handling rule: do not place long-lived secrets in takeover artifacts",
+      `- timeout or expiry condition: ${approvalRecord.timeout_at}`,
+      "",
+      "## Expected Result",
+      "",
+      `- expected output: ${execution.workerOutput.next_action}`,
+      `- artifact destination: artifacts/runs/${execution.runResult.run_id}/takeover/result.en.md`,
+      `- evidence destination: artifacts/runs/${execution.runResult.run_id}/takeover/result.en.md`,
+      `- resume criteria: update pause context via ${approvalRecord.card_id} and reference the same run_id takeover root in the manifest`,
+      "",
+      "## Resume Notes",
+      "",
+      `- next loop role: ${execution.runResult.run_role}`,
+      "- next command or check: review the archived takeover result and decide whether to resume or terminate",
+      "- rollback instruction if the takeover fails: stop the job and return control to owner review",
+      "",
+    ].join("\n"),
+  );
+  const artifactIndex = await buildArtifactIndex(execution.runRoot, execution.runResult.run_id, execution.runResult.run_role);
+  execution.artifactIndex = artifactIndex;
+  await writeJson(execution.artifactIndexPath, artifactIndex);
+}
+
+function buildPauseContext(
+  execution: AdapterExecutionResult | null,
+  approvalRecord: Awaited<ReturnType<typeof writeApprovalArchive>> | null,
+): JobManifestPauseContext {
+  if (execution === null) {
+    return emptyPauseContext();
+  }
+  const jobState = mapRunExitToJobState(execution.runResult.status, execution.runResult.run_role);
+  const waitingOn = waitingOnForState(jobState);
+  if (waitingOn === null) {
+    return emptyPauseContext();
+  }
+  return {
+    is_paused: true,
+    pause_reason: execution.runResult.status,
+    waiting_on: approvalRecord?.waiting_on ?? waitingOn,
+    resume_action: approvalRecord?.resume_action ?? execution.workerOutput.next_action,
+    paused_at: execution.runResult.ended_at,
+    related_card_id: approvalRecord?.card_id ?? null,
+    expires_at: approvalRecord?.timeout_at ?? null,
+  };
+}
+
+function buildRunRecoveryState(
+  approvalRecord: Awaited<ReturnType<typeof writeApprovalArchive>> | null,
+): { card_id: string; waiting_on: "owner" | "takeover"; resume_action: string } | null {
+  if (approvalRecord === null || approvalRecord.waiting_on === null || approvalRecord.resume_action === null) {
+    return null;
+  }
+  return {
+    card_id: approvalRecord.card_id,
+    waiting_on: approvalRecord.waiting_on,
+    resume_action: approvalRecord.resume_action,
+  };
+}
+
 function buildJobManifest(
   layout: ReturnType<typeof resolveJobRootLayout>,
   taskPacket: TaskPacket,
@@ -392,13 +748,16 @@ function buildJobManifest(
   planRecord: Awaited<ReturnType<typeof writeDevelopmentPlan>>,
   freezeRecord: Awaited<ReturnType<typeof writeContractFreeze>>,
   approvalRecord: Awaited<ReturnType<typeof writeApprovalArchive>>,
+  approvalRecords: Array<Awaited<ReturnType<typeof writeApprovalArchive>>>,
   executions: AdapterExecutionResult[],
   adapterId: string,
 ): JobManifest {
   const runs = buildManifestRunRecords(layout, executions);
   const storyRecord = buildManifestStoryRecord(taskPacket, executions);
   const latestRunId = runs.length > 0 ? runs[runs.length - 1].run_id : "";
-  const createdAt = approvalRecord.decided_at;
+  const latestExecution = executions.length > 0 ? executions[executions.length - 1] : null;
+  const latestApprovalRecord = approvalRecords.length > 0 ? approvalRecords[approvalRecords.length - 1] : null;
+  const createdAt = approvalRecord.decided_at ?? nowIso();
   const updatedAt = executions.length > 0 ? executions[executions.length - 1].runResult.ended_at : nowIso();
   const status = storyRecord.queue_state;
 
@@ -415,15 +774,7 @@ function buildJobManifest(
     active_story_id: taskPacket.story.story_id,
     current_run_id: latestRunId,
     approved_adapter_set: [adapterId],
-    pause_context: {
-      is_paused: false,
-      pause_reason: null,
-      waiting_on: null,
-      resume_action: null,
-      paused_at: null,
-      related_card_id: null,
-      expires_at: null,
-    },
+    pause_context: buildPauseContext(latestExecution, latestApprovalRecord),
     language_policy: taskPacket.language_policy,
     budget_limits: taskPacket.budget_limits,
     time_limits: taskPacket.time_limits,
@@ -438,7 +789,7 @@ function buildJobManifest(
       approval_card_id: approvalRecord.card_id,
       summary_zh_ref: layout.relativeToJobRoot(approvalRecord.summary_path),
       approval_state: approvalRecord.card_state,
-      approved_at: approvalRecord.decided_at,
+      approved_at: approvalRecord.decided_at ?? createdAt,
     },
     freeze: {
       freeze_id: taskPacket.freeze_id,
@@ -448,11 +799,11 @@ function buildJobManifest(
       checksum_path: layout.relativeToJobRoot(freezeRecord.checksum_path),
       hash: freezeRecord.hash,
       approval_card_id: approvalRecord.card_id,
-      approved_at: approvalRecord.decided_at,
+      approved_at: approvalRecord.decided_at ?? createdAt,
     },
     stories: [storyRecord],
     runs,
-    approvals: [buildManifestApprovalRecord(layout, approvalRecord)],
+    approvals: approvalRecords.map((record) => buildManifestApprovalRecord(layout, record)),
     artifacts: {
       runs_root: "artifacts/runs",
       sessions_root: "artifacts/sessions",
@@ -462,9 +813,7 @@ function buildJobManifest(
         layout.relativeToJobRoot(freezeRecord.path),
         layout.relativeToJobRoot(freezeRecord.json_path),
         layout.relativeToJobRoot(freezeRecord.checksum_path),
-        layout.relativeToJobRoot(approvalRecord.snapshot_path),
-        layout.relativeToJobRoot(approvalRecord.decision_path),
-        layout.relativeToJobRoot(approvalRecord.summary_path),
+        ...approvalRecords.flatMap((record) => approvalRelativePaths(layout, record)),
         "job-manifest.json",
         "checksums.txt",
       ]),
@@ -511,7 +860,7 @@ async function buildChecksumRecords(
   layout: ReturnType<typeof resolveJobRootLayout>,
   planRecord: Awaited<ReturnType<typeof writeDevelopmentPlan>>,
   freezeRecord: Awaited<ReturnType<typeof writeContractFreeze>>,
-  approvalRecord: Awaited<ReturnType<typeof writeApprovalArchive>>,
+  approvalRecords: Array<Awaited<ReturnType<typeof writeApprovalArchive>>>,
   executions: AdapterExecutionResult[],
   extraRelativePaths: string[] = [],
 ): Promise<ChecksumRecord[]> {
@@ -529,9 +878,7 @@ async function buildChecksumRecords(
     layout.relativeToJobRoot(freezeRecord.path),
     layout.relativeToJobRoot(freezeRecord.json_path),
     layout.relativeToJobRoot(freezeRecord.checksum_path),
-    layout.relativeToJobRoot(approvalRecord.snapshot_path),
-    layout.relativeToJobRoot(approvalRecord.decision_path),
-    layout.relativeToJobRoot(approvalRecord.summary_path),
+    ...approvalRecords.flatMap((record) => approvalRelativePaths(layout, record)),
     "job-manifest.json",
     ...runRelativePaths,
     ...extraRelativePaths,
@@ -544,9 +891,9 @@ export interface Phase1RunSummary {
   job_id: string;
   job_root: string;
   builder_run_id: string;
-  qa_run_id: string;
+  qa_run_id: string | null;
   builder_status: string;
-  qa_status: string;
+  qa_status: string | null;
   manifest_path: string;
   checksums_path: string;
 }
@@ -558,10 +905,11 @@ export async function runPhase1Local(repoRoot: string): Promise<Phase1RunSummary
   const approvalCard = await readJson<ApprovalCardSnapshot>(
     join(repoRoot, "control", "fixtures", "phase1-local-approval-card.json"),
   );
-  const decision = buildApprovalDecision(approvalCard);
   const layout = resolveJobRootLayout(repoRoot, approvalCard.job_id);
   await assertFreshJobRoot(layout);
   await ensureJobRootLayout(layout);
+  await stageJobRepoWorkspace(repoRoot, layout.repoArchiveRoot);
+  const workerRepoRoot = layout.repoArchiveRoot;
 
   const builderRunId = createRunId("builder");
   const qaRunId = createRunId("qa");
@@ -571,28 +919,29 @@ export async function runPhase1Local(repoRoot: string): Promise<Phase1RunSummary
   const qaPreviousHandoffPath = join(builderRunRoot, "reports", "handoff.en.md");
 
   const builderTaskPacket = await buildTaskPacket(
-    repoRoot,
+    workerRepoRoot,
+    baseCommit,
     "builder",
     builderRunId,
     layout.archiveStateRoot,
     builderRunRoot,
-    layout.runtimeHomeRoot,
+    layout.runtimeHomeRootForRole("builder"),
     builderPreviousHandoffPath,
   );
-  const qaTaskPacket = await buildTaskPacket(
-    repoRoot,
+  const qaTaskPacketPreview = await buildTaskPacket(
+    workerRepoRoot,
+    baseCommit,
     "qa",
     qaRunId,
     layout.archiveStateRoot,
     qaRunRoot,
-    layout.runtimeHomeRoot,
+    layout.runtimeHomeRootForRole("qa"),
     qaPreviousHandoffPath,
   );
 
-  const approvalRecord = await writeApprovalArchive(layout.approvalRoot(approvalCard.card_id), approvalCard, decision);
   const allExpectedArtifacts = uniqueStrings([
     ...builderTaskPacket.story.expected_artifacts,
-    ...qaTaskPacket.story.expected_artifacts,
+    ...qaTaskPacketPreview.story.expected_artifacts,
     "artifacts/final/final-summary.en.md",
     "artifacts/metadata/environment.json",
   ]);
@@ -607,9 +956,9 @@ export async function runPhase1Local(repoRoot: string): Promise<Phase1RunSummary
     adapters: [adapterInfo.adapter_id],
     runRoles: ["builder", "qa"],
     architectureDirection: [
-      "Use one canonical job root under jobs/<job_id>/ for governance, approvals, state, runtime-home, and run bundles.",
+      "Use one canonical job root under jobs/<job_id>/ for governance, an isolated repo workspace, approvals, state, runtime-home, and run bundles.",
       "Preserve the existing builder to QA worker order and local generic CLI adapter.",
-      "Mirror the latest canonical state files into state/ for control-shell recovery.",
+      "Mirror the latest canonical state files into state/ for control-shell recovery, while keeping builder and QA runtime homes role-scoped.",
     ],
     milestones: [
       "Write the fixed plan and approval archive.",
@@ -631,6 +980,15 @@ export async function runPhase1Local(repoRoot: string): Promise<Phase1RunSummary
     openQuestions: ["none"],
     approvalRequested: approvalCard.requested_action,
   });
+  const decision = await loadApprovalDecision(repoRoot, approvalCard);
+  const approvalRecord = await writeApprovalArchive(layout.approvalRoot(approvalCard.card_id), approvalCard, decision);
+  if (approvalRecord.decision_path === null || approvalRecord.decided_at === null) {
+    throw new Error("phase1 fixture approval must be decided before freeze generation");
+  }
+  if (decision.decision !== "approve") {
+    throw new Error("phase1 local execution requires an approved Development Plan before freeze generation");
+  }
+  const approvalRecords: Array<Awaited<ReturnType<typeof writeApprovalArchive>>> = [approvalRecord];
 
   const freezeRecord = await writeContractFreeze(layout.freezePath, layout.freezeJsonPath, {
     metadata: buildFreezeMetadata(
@@ -640,7 +998,7 @@ export async function runPhase1Local(repoRoot: string): Promise<Phase1RunSummary
       dependencySnapshotDigest,
       adapterInfo,
       builderTaskPacket,
-      qaTaskPacket,
+      qaTaskPacketPreview,
       decision.decided_at,
     ),
     approvalSnapshotPath: layout.relativeToJobRoot(approvalRecord.snapshot_path),
@@ -669,8 +1027,11 @@ export async function runPhase1Local(repoRoot: string): Promise<Phase1RunSummary
   const executions: AdapterExecutionResult[] = [];
   await stateStore.prepareRun(builderTaskPacket);
   const builderEnvelope = await buildRunEnvelope(
-    repoRoot,
+    workerRepoRoot,
     builderTaskPacket,
+    layout.archiveStateRoot,
+    builderRunRoot,
+    layout.runtimeHomeRootForRole("builder"),
     builderPreviousHandoffPath,
     approvalRecord.snapshot_path,
     {
@@ -682,7 +1043,17 @@ export async function runPhase1Local(repoRoot: string): Promise<Phase1RunSummary
   );
   const builderExecution = await normalizeRunArtifacts(layout, await adapter.execute(builderEnvelope));
   executions.push(builderExecution);
-  await stateStore.recordRun(builderTaskPacket, builderExecution);
+  let builderRecoveryRecord: Awaited<ReturnType<typeof writeApprovalArchive>> | null = null;
+  const builderJobState = mapRunExitToJobState(builderExecution.runResult.status, builderExecution.runResult.run_role);
+  if (builderJobState === "AWAITING_OWNER" || builderJobState === "AWAITING_TAKEOVER") {
+    const recoveryCard = buildRecoveryCard(builderTaskPacket, builderExecution);
+    builderRecoveryRecord = await writeApprovalArchive(layout.approvalRoot(recoveryCard.card_id), recoveryCard, null);
+    if (builderJobState === "AWAITING_TAKEOVER") {
+      await writeRecoveryTakeoverPacket(builderTaskPacket, builderExecution, builderRecoveryRecord);
+    }
+    approvalRecords.push(builderRecoveryRecord);
+  }
+  await stateStore.recordRun(builderTaskPacket, builderExecution, buildRunRecoveryState(builderRecoveryRecord));
 
   const builderManifest = buildJobManifest(
     layout,
@@ -691,66 +1062,100 @@ export async function runPhase1Local(repoRoot: string): Promise<Phase1RunSummary
     planRecord,
     freezeRecord,
     approvalRecord,
+    approvalRecords,
     executions,
     adapterInfo.adapter_id,
   );
   await writeJobManifest(layout.manifestPath, builderManifest);
 
-  await stateStore.prepareRun(qaTaskPacket);
-  const qaEnvelope = await buildRunEnvelope(
-    repoRoot,
-    qaTaskPacket,
-    qaPreviousHandoffPath,
-    approvalRecord.snapshot_path,
-    {
-      trace_index_path: stateStore.getTraceIndexPath(),
-      builder_run_root: builderExecution.runRoot,
-      builder_run_result_path: builderExecution.runResultPath,
-      builder_artifact_index_path: builderExecution.artifactIndexPath,
-    },
-  );
-  const qaExecution = await normalizeRunArtifacts(layout, await adapter.execute(qaEnvelope));
-  executions.push(qaExecution);
-  await stateStore.recordRun(qaTaskPacket, qaExecution);
-
-  const finalManifest = buildJobManifest(
-    layout,
-    qaTaskPacket,
-    baseBranch,
-    planRecord,
-    freezeRecord,
-    approvalRecord,
-    executions,
-    adapterInfo.adapter_id,
-  );
-  await writeJobManifest(layout.manifestPath, finalManifest);
-
-  let manifestForChecksums = finalManifest;
+  let qaTaskPacket: TaskPacket | null = null;
+  let qaExecution: AdapterExecutionResult | null = null;
+  let manifestForChecksums = builderManifest;
+  let latestTaskPacketForIntegrity = builderTaskPacket;
   const extraChecksumPaths: string[] = [];
-  if (qaExecution.runResult.status === "SUCCESS") {
-    const completedAt = nowIso();
-    const finalization = await finalizeArchive({
-      layout,
-      manifest: finalManifest,
-      environment: buildEnvironmentSnapshotMetadata(layout, finalManifest),
-      finalSummary: buildFinalSummaryMetadata(layout, qaTaskPacket, finalManifest, executions, completedAt),
-    });
-    manifestForChecksums = finalization.manifest;
-    extraChecksumPaths.push(finalization.environment_path, finalization.final_summary_path);
-    await writeJobManifest(layout.manifestPath, manifestForChecksums);
-    await stateStore.recordArchiveFinalization(
-      qaTaskPacket,
-      qaExecution.runResult.run_id,
-      qaExecution.runResult.run_role,
-      finalization.final_summary_path,
+  if (builderExecution.runResult.status === "SUCCESS") {
+    qaTaskPacket = await buildTaskPacket(
+      workerRepoRoot,
+      baseCommit,
+      "qa",
+      qaRunId,
+      layout.archiveStateRoot,
+      qaRunRoot,
+      layout.runtimeHomeRootForRole("qa"),
+      qaPreviousHandoffPath,
     );
+    latestTaskPacketForIntegrity = qaTaskPacket;
+    await stateStore.prepareRun(qaTaskPacket);
+    const qaEnvelope = await buildRunEnvelope(
+      workerRepoRoot,
+      qaTaskPacket,
+      layout.archiveStateRoot,
+      qaRunRoot,
+      layout.runtimeHomeRootForRole("qa"),
+      qaPreviousHandoffPath,
+      approvalRecord.snapshot_path,
+      {
+        trace_index_path: stateStore.getTraceIndexPath(),
+        builder_run_root: builderExecution.runRoot,
+        builder_run_result_path: builderExecution.runResultPath,
+        builder_artifact_index_path: builderExecution.artifactIndexPath,
+      },
+    );
+    qaExecution = await normalizeRunArtifacts(layout, await adapter.execute(qaEnvelope));
+    executions.push(qaExecution);
+    let qaRecoveryRecord: Awaited<ReturnType<typeof writeApprovalArchive>> | null = null;
+    const qaJobState = mapRunExitToJobState(qaExecution.runResult.status, qaExecution.runResult.run_role);
+    if (qaJobState === "AWAITING_OWNER" || qaJobState === "AWAITING_TAKEOVER") {
+      const recoveryCard = buildRecoveryCard(qaTaskPacket, qaExecution);
+      qaRecoveryRecord = await writeApprovalArchive(layout.approvalRoot(recoveryCard.card_id), recoveryCard, null);
+      if (qaJobState === "AWAITING_TAKEOVER") {
+        await writeRecoveryTakeoverPacket(qaTaskPacket, qaExecution, qaRecoveryRecord);
+      }
+      approvalRecords.push(qaRecoveryRecord);
+    }
+    await stateStore.recordRun(qaTaskPacket, qaExecution, buildRunRecoveryState(qaRecoveryRecord));
+
+    const finalManifest = buildJobManifest(
+      layout,
+      qaTaskPacket,
+      baseBranch,
+      planRecord,
+      freezeRecord,
+      approvalRecord,
+      approvalRecords,
+      executions,
+      adapterInfo.adapter_id,
+    );
+    manifestForChecksums = finalManifest;
+    await writeJobManifest(layout.manifestPath, finalManifest);
+
+    if (qaExecution.runResult.status === "SUCCESS") {
+      const completedAt = nowIso();
+      const finalization = await finalizeArchive({
+        layout,
+        manifest: finalManifest,
+        environment: buildEnvironmentSnapshotMetadata(layout, finalManifest),
+        finalSummary: buildFinalSummaryMetadata(layout, qaTaskPacket, finalManifest, executions, completedAt),
+      });
+      manifestForChecksums = finalization.manifest;
+      extraChecksumPaths.push(finalization.environment_path, finalization.final_summary_path);
+      await writeJobManifest(layout.manifestPath, manifestForChecksums);
+      await stateStore.recordArchiveFinalization(
+        qaTaskPacket,
+        qaExecution.runResult.run_id,
+        qaExecution.runResult.run_role,
+        finalization.final_summary_path,
+      );
+    }
+  } else {
+    extraChecksumPaths.push(layout.relativeToJobRoot(join(qaRunRoot, "metadata", "task-packet.en.json")));
   }
 
   const checksumRecords = await buildChecksumRecords(
     layout,
     planRecord,
     freezeRecord,
-    approvalRecord,
+    approvalRecords,
     executions,
     extraChecksumPaths,
   );
@@ -762,7 +1167,7 @@ export async function runPhase1Local(repoRoot: string): Promise<Phase1RunSummary
       layout,
       stateStore,
       manifestForChecksums,
-      qaTaskPacket,
+      latestTaskPacketForIntegrity,
       formatChecksumVerificationFailure("freeze checksum verification failed", freezeVerification),
     );
   }
@@ -773,7 +1178,7 @@ export async function runPhase1Local(repoRoot: string): Promise<Phase1RunSummary
       layout,
       stateStore,
       manifestForChecksums,
-      qaTaskPacket,
+      latestTaskPacketForIntegrity,
       formatChecksumVerificationFailure("job checksum verification failed", checksumVerification),
     );
   }
@@ -782,9 +1187,9 @@ export async function runPhase1Local(repoRoot: string): Promise<Phase1RunSummary
     job_id: builderTaskPacket.job_id,
     job_root: layout.jobRoot,
     builder_run_id: builderExecution.runResult.run_id,
-    qa_run_id: qaExecution.runResult.run_id,
+    qa_run_id: qaExecution?.runResult.run_id ?? null,
     builder_status: builderExecution.runResult.status,
-    qa_status: qaExecution.runResult.status,
+    qa_status: qaExecution?.runResult.status ?? null,
     manifest_path: layout.manifestPath,
     checksums_path: layout.checksumsPath,
   };

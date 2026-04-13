@@ -22,7 +22,7 @@ In scope
 
 Out of scope
 - mobile channel integration
-- Wuying automation
+- cloud desktop or remote desktop vendor integration
 - review executor
 - multi-tenant scheduling
 - dashboards

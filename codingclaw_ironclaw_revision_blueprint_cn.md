@@ -12,7 +12,7 @@ CodingClaw 是基于 **IronClaw** 思路进行二次设计与定制化扩展的�
 - 以冻结合同为范围控制基础
 - 以 Builder / QA 双轨机制提升质量
 - 以 Docker 隔离和轨迹归档保证复现性
-- 在必要时引入云桌面进行 GUI 特例处理与人工接管
+- 在需要真实图形界面时，允许系统在本地 Ubuntu 图形会话中自动执行 GUI 步骤
 
 的 **7×24 小时自动编码编排系统**。
 
@@ -87,7 +87,7 @@ v0.2 的实现方式明确为：
 - **Coding Loop = Execution Kernel**
 - **Builder / QA Executors = Role-specific Workers**
 - **Artifact Storage = Audit Plane**
-- **Wuying Desktop = GUI Exception Plane**
+- **Local Ubuntu GUI Session = GUI Execution Surface**
 
 ### 3.3 文件状态优先于长上下文记忆
 
@@ -162,10 +162,10 @@ v0.2 的实现方式明确为：
    |- Metadata DB
 
 Optional:
-[Aliyun Wuying Desktop]
-   |- GUI Exception Handling
-   |- Human Takeover
-   |- Remote Assistance
+[Local Ubuntu GUI Session]
+   |- Headed GUI Automation
+   |- Local Human Takeover
+   |- Rendered Evidence Capture
 ```
 
 ## 4.2 四层模型
@@ -785,7 +785,8 @@ codingclaw/
     contracts/
 
   adapters/
-    codex/
+    claude-code-builder/
+    codex-qa/
     aider/
     generic-cli/
 
@@ -973,16 +974,16 @@ artifacts/
 
 ---
 
-## 17. 阿里无影云电脑集成策略
+## 17. 本地 Ubuntu 图形执行面策略
 
 ### 17.1 定位
 
-阿里无影不是主编码执行面，而是：
+本地 Ubuntu 图形会话不是旁路特例，而是默认 GUI 执行面：
 
-- GUI 特例平面
-- 人工接管平面
-- 远程协助平面
-- Windows-only / 桌面类工具处理平面
+- Headed Browser / GUI 自动化平面
+- 渲染证据采集平面
+- 本地人工接管平面
+- Linux 桌面类工具执行平面
 
 ### 17.2 推荐使用顺序
 
@@ -995,9 +996,9 @@ artifacts/
 
 ### 17.3 不推荐方式
 
-不推荐将无影作为：
+不推荐将图形执行面设计成：
 
-- 主 Builder 执行器
+- 云桌面或远程桌面桥接
 - 全天候唯一编码环境
 - 全链路自动点击执行核心
 
@@ -1100,7 +1101,7 @@ Phase 1 明确不纳入：
 
 - 多通道同时接入
 - 多执行器并行接入
-- 无影桥接
+- 云桌面桥接
 - Dashboard
 - 历史任务复用
 - 生产级多任务调度
@@ -1120,13 +1121,14 @@ Phase 1 明确不纳入：
 
 目标：
 
-- Codex 适配器
+- Claude Code Builder 适配器
+- Codex QA 适配器
 - Aider 适配器
 - 通用 CLI 适配器
 - role packs
 - test matrix 支持
 
-### Phase 4：无影与人工接管
+### Phase 4：本地 GUI 自动化与人工接管
 
 目标：
 
@@ -1184,9 +1186,9 @@ Phase 1 明确不纳入：
 - `CHECKSUM_POLICY.md`
 - `JOB_MANIFEST_SCHEMA.md`
 
-### 20.5 无影相关文档
+### 20.5 本地 GUI 相关文档
 
-- `WUYING_INTEGRATION_PLAN.md`
+- `UBUNTU_GUI_RUNTIME_PLAN.md`
 - `TAKEOVER_FLOW.md`
 - `TAKEOVER_PACKET_TEMPLATE.en.md`
 - `GUI_EXCEPTION_POLICY.md`
@@ -1198,7 +1200,7 @@ Phase 1 明确不纳入：
 以下内容不属于当前版本目标：
 
 - 跳过用户审批直接开始编码
-- 让 GUI 云桌面成为主编码执行面
+- 依赖云桌面或远程桌面桥接作为主编码执行面
 - 依赖单一长会话连续完成所有任务
 - 不做预算、不做熔断地无限循环
 - 伪造执行器轨迹代替真实运行痕迹
@@ -1216,13 +1218,13 @@ Phase 1 明确不纳入：
 3. 跑通单轮 **Builder / QA**，确保 story traceability 与 QA verdict 成立。
 4. 补充归档、checksums、失败恢复、审批卡片与预算约束。
 5. 再扩展执行器适配层。
-6. 最后接入无影桥接与高级运营能力。
+6. 最后补齐本地 GUI 自动化与高级运营能力。
 
 ---
 
 ## 23. 一句话架构定义
 
-> CodingClaw 是一个以 IronClaw Fork 为控制外壳、以 coding loop 为执行内核、以冻结合同为范围边界、以 Builder/QA 双轨为质量机制、以 Docker 隔离和归档为审计基础、并在必要时借助阿里无影完成 GUI 特例处理与人工接管的自动编码代理系统。
+> CodingClaw 是一个以 IronClaw Fork 为控制外壳、以 coding loop 为执行内核、以冻结合同为范围边界、以 Builder/QA 双轨为质量机制、以 Docker 隔离和归档为审计基础、并在本地 Ubuntu 图形会话中完成自动 GUI 执行与必要时人工接管的自动编码代理系统。
 
 ---
 
@@ -1478,7 +1480,7 @@ v0.2 不追求一次接完所有执行器。
 
 1. 先冻结 `Executor Adapter Contract`
 2. 先实现一个 `Generic CLI Adapter`
-3. 再实现 `Codex Adapter`
+3. 再实现 `Claude Code Builder Adapter` 与 `Codex QA Adapter`
 4. 再实现 `Aider Adapter`
 
 ---

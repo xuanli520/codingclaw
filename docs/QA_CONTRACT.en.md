@@ -4,6 +4,8 @@
 
 The QA executor validates that a builder output is reproducible, inside scope, and supported by evidence.
 
+Phase 1 binds the QA role to the Codex execution profile.
+
 ## Inputs
 
 QA reads:

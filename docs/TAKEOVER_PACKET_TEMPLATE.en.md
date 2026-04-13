@@ -2,7 +2,7 @@
 
 ## Purpose
 
-`takeover-packet.en.md` is the standard human handoff document for a governed GUI or interactive interruption.
+`takeover-packet.en.md` is the standard human handoff document for a governed local GUI or interactive interruption.
 
 ## Archive Location
 

@@ -13,8 +13,8 @@ Repository documents remain normative. External documents in this file are suppo
 - Docker volumes fit cache or container-owned persistent data better than additional bind mounts.
 - SQLite is a reasonable Phase 1 metadata store only for single-node, local metadata with low write concurrency.
 - PostgreSQL is the correct upgrade path once the system needs multi-process coordination, multi-client access, or higher write concurrency.
-- Wuying is feasible as a governed GUI exception and human takeover surface.
-- The current Wuying Phase 1 strategy remains correct: document the handoff path first, do not depend on undocumented automation interfaces.
+- The supported Phase 1 GUI surface is a single Ubuntu host with a local graphical session.
+- The system should not depend on a cloud desktop vendor or remote-assistance bridge for normal automation.
 - The executor-agnostic adapter contract is feasible, but capability declarations must stay profile-specific rather than assume one universal tool surface.
 
 ## Docker Worker Runtime
@@ -45,19 +45,11 @@ Repository documents remain normative. External documents in this file are suppo
 - `DEPLOYMENT_PLAN.md`: PostgreSQL MVCC and advisory locks make it a better fit for scheduler coordination, queue ownership, and other multi-process control-plane workflows.
   References: [MVCC Introduction](https://www.postgresql.org/docs/current/mvcc-intro.html), [Explicit Locking](https://www.postgresql.org/docs/current/explicit-locking.html)
 
-## Wuying GUI Exception Plane
+## Local Ubuntu GUI Runtime Baseline
 
-- `WUYING_INTEGRATION_PLAN.md`, `GUI_EXCEPTION_POLICY.md`: Wuying is positioned by Alibaba Cloud as desktop-as-a-service for end users, not as a generic server control plane.
-  Reference: [What is Elastic Desktop Service](https://help.aliyun.com/zh/wuying-workspace/product-overview/what-is-elastic-desktop-service)
+- `UBUNTU_GUI_RUNTIME_PLAN.md`, `GUI_EXCEPTION_POLICY.md`, `DEPLOYMENT_PLAN.md`: the repository design keeps the control shell, workers, artifacts, and headed GUI surface on one Ubuntu host so audit paths and evidence paths stay local and deterministic.
 
-- `WUYING_INTEGRATION_PLAN.md`, `TAKEOVER_FLOW.md`: remote assistance supports an approval-and-accept flow that matches a governed takeover path better than a silent automation path.
-  Reference: [Use remote assistance and collaboration session](https://help.aliyun.com/zh/wtc/user-guide/use-remote-assitance-and-collaboration-session)
-
-- `WUYING_INTEGRATION_PLAN.md`, `SECURITY_POLICY.md`: Wuying login and access controls support SSO, MFA, client validation, and organization-scoped access control.
-  References: [Certification overview](https://help.aliyun.com/zh/wuying-workspace/user-guide/certification-overview), [Web client](https://help.aliyun.com/zh/wtc/user-guide/web-client)
-
-- `WUYING_INTEGRATION_PLAN.md`: the Web client is a convenient access path but has usage limits such as internet-only access and no local disk mapping, which supports keeping it as an exception surface rather than the default coding environment.
-  Reference: [Web client](https://help.aliyun.com/zh/wtc/user-guide/web-client)
+- `TAKEOVER_FLOW.md`: human takeover remains a fallback path for blocked interactive steps. It is not the normal execution surface and does not require a cloud desktop vendor to exist.
 
 ## Executor And Adapter Boundary
 
@@ -73,5 +65,5 @@ Repository documents remain normative. External documents in this file are suppo
 ## Limits Of External Proof
 
 - No official Docker, SQLite, PostgreSQL, Alibaba Cloud, or OpenAI document defines CodingClaw's freeze contract, approval card schema, artifact archive structure, or trace index schema.
-- No official Wuying document found in this review directly proves a stable native API for the full `takeover packet -> resume semantics` workflow defined by this repository.
+- No official external document in this review defines the full `takeover packet -> resume semantics` workflow or the exact local GUI orchestration rules used by this repository.
 - These governance and audit objects remain internal platform design decisions. They are feasible, but their correctness must be validated by implementation and integration tests, not by vendor documentation alone.

@@ -39,7 +39,8 @@
   "requested_capabilities": [
     "filesystem_read",
     "filesystem_write",
-    "shell_command"
+    "shell_command",
+    "container_control"
   ],
   "story": {
     "story_id": "STORY-PHASE1-LOCAL-001",
@@ -57,7 +58,7 @@
     "out_of_scope_checklist": [
       "Mobile channel input",
       "Production deployment hardening",
-      "Wuying integration",
+      "Cloud desktop vendor integration",
       "Distributed scheduling",
       "Dashboard UI"
     ],
