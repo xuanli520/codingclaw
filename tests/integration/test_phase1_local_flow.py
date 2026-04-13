@@ -767,8 +767,8 @@ def test_phase1_local_capability_gate_stops_undeclared_or_denied_requests_before
 
     job_root = repo_root / "jobs" / "job-phase1-local"
     manifest = json.loads((job_root / "job-manifest.json").read_text(encoding="utf-8"))
-    run_root = next(path for path in (job_root / "artifacts" / "runs").iterdir() if path.is_dir())
-    command_log = (run_root / "logs" / "command-log.txt").read_text(encoding="utf-8")
+    builder_run_root = job_root / next(run["root"] for run in manifest["runs"] if run["run_role"] == "builder")
+    command_log = (builder_run_root / "logs" / "command-log.txt").read_text(encoding="utf-8")
 
     assert [run["run_role"] for run in manifest["runs"]] == ["builder"]
     assert [run["run_exit_status"] for run in manifest["runs"]] == ["FAILED_POLICY"]
@@ -796,8 +796,8 @@ def test_phase1_local_capability_gate_manifest_load_failure_returns_failed_polic
 
     job_root = repo_root / "jobs" / "job-phase1-local"
     manifest = json.loads((job_root / "job-manifest.json").read_text(encoding="utf-8"))
-    run_root = next(path for path in (job_root / "artifacts" / "runs").iterdir() if path.is_dir())
-    command_log = (run_root / "logs" / "command-log.txt").read_text(encoding="utf-8")
+    builder_run_root = job_root / next(run["root"] for run in manifest["runs"] if run["run_role"] == "builder")
+    command_log = (builder_run_root / "logs" / "command-log.txt").read_text(encoding="utf-8")
 
     assert [run["run_exit_status"] for run in manifest["runs"]] == ["FAILED_POLICY"]
     assert manifest["status"] == "AWAITING_OWNER"
