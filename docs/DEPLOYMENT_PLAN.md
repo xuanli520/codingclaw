@@ -2,7 +2,7 @@
 
 ## Goal
 
-This document defines the recommended deployment path for CodingClaw from local development to a stable single-node production baseline.
+This document defines the recommended deployment path for CodingClaw from local development to a stable single-node production baseline on one Ubuntu host with a graphical session.
 
 Official feasibility references for Docker, SQLite, and PostgreSQL are collected in [OFFICIAL_REFERENCE_NOTES.md](OFFICIAL_REFERENCE_NOTES.md).
 
@@ -24,14 +24,15 @@ The control host runs:
 - approval queue manager
 - scheduler
 - budget and policy guards
+- the local graphical session used by headed automation when a story requires a real GUI surface
 
 ### Worker Runtime
 
 Workers run in Docker with role-specific images:
 
 - `worker-base`
-- `worker-builder`
-- `worker-qa`
+- `worker-builder` with the Claude Code builder profile
+- `worker-qa` with the Codex QA profile
 
 Each worker mounts:
 
@@ -84,16 +85,17 @@ Redis is optional and not required for the first release.
 
 ### Stage 3: Adapter Expansion
 
-- Codex adapter
+- Claude Code builder adapter
+- Codex QA adapter
 - Aider adapter
 - richer capability manifests
 - optional review executor
 
-### Stage 4: GUI Exception Integration
+### Stage 4: Local GUI Automation Hardening
 
-- Wuying bridge
-- takeover packet flow
-- assisted resume path
+- host display bootstrap
+- headed browser or desktop automation evidence capture
+- takeover packet flow for exceptional local recovery only
 
 ## Environment Separation
 
@@ -143,6 +145,6 @@ The following items are intentionally deferred beyond Phase 1:
 
 - multi-tenant job queues
 - horizontally scaled schedulers
-- browser or GUI automation as a primary surface
+- cloud desktop bridges or remote-assistance control planes
 - dashboard analytics
 - shared warm workers

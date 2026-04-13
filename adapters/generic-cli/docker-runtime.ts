@@ -1,4 +1,4 @@
-import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
 import { ensureDir, readText, sha256Text, toPosixPath, writeJson } from "../../core/loop/support.ts";
 import type {
   ContainerPathMap,
@@ -19,6 +19,7 @@ export const CONTAINER_PATHS = {
 
 const DEFAULT_BASE_IMAGE = "codingclaw-worker-base:phase1-local";
 const IMAGE_SIGNATURE_LABEL = "io.codingclaw.image-signature";
+const WINDOWS_SCRIPT_TIMEOUT_GRACE_MS = 500;
 
 const DEFAULT_ROLE_IMAGES: Record<"builder" | "qa", string> = {
   builder: "codingclaw-worker-builder:phase1-local",
@@ -426,9 +427,12 @@ function resolveTimeoutMs(timeLimits: Record<string, unknown>): number | null {
 }
 
 async function spawnCommand(command: string[], cwd: string, timeoutMs: number | null = null): Promise<CommandExecutionResult> {
+  const spawnedCommand = normalizeSpawnCommand(command);
+  const effectiveTimeoutMs =
+    timeoutMs === null ? null : timeoutMs + timeoutGraceMs(command, spawnedCommand);
   try {
     const handle = Bun.spawn({
-      cmd: command,
+      cmd: spawnedCommand,
       cwd,
       stdout: "pipe",
       stderr: "pipe",
@@ -437,12 +441,12 @@ async function spawnCommand(command: string[], cwd: string, timeoutMs: number | 
     const stderrPromise = new Response(handle.stderr).text();
     let timedOut = false;
     const timeoutHandle =
-      timeoutMs === null
+      effectiveTimeoutMs === null
         ? null
         : setTimeout(() => {
             timedOut = true;
             handle.kill();
-          }, timeoutMs);
+          }, effectiveTimeoutMs);
     const exitCode = await handle.exited;
     if (timeoutHandle !== null) {
       clearTimeout(timeoutHandle);
@@ -466,6 +470,60 @@ async function spawnCommand(command: string[], cwd: string, timeoutMs: number | 
       timed_out: false,
     };
   }
+}
+
+function pythonLauncherCommand(scriptPath: string): string[] | null {
+  const python = Bun.which("python") ?? Bun.which("py");
+  if (python === null) {
+    return null;
+  }
+  const launcher = basename(python).toLowerCase();
+  if (launcher === "py" || launcher === "py.exe") {
+    return [python, "-3", scriptPath];
+  }
+  return [python, scriptPath];
+}
+
+function normalizeSpawnCommand(command: string[]): string[] {
+  if (process.platform !== "win32" || command.length === 0) {
+    return command;
+  }
+  const executable = command[0];
+  if (!isAbsolute(executable)) {
+    return command;
+  }
+  const extension = extname(executable).toLowerCase();
+  if (extension === ".py") {
+    const launcher = pythonLauncherCommand(executable);
+    return launcher === null ? command : [...launcher, ...command.slice(1)];
+  }
+  if (extension === ".cmd" || extension === ".bat") {
+    const shell = process.env.ComSpec?.trim() || "cmd.exe";
+    return [shell, "/d", "/s", "/c", executable, ...command.slice(1)];
+  }
+  if (extension === ".ps1") {
+    return [
+      "powershell.exe",
+      "-NoLogo",
+      "-NoProfile",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-File",
+      executable,
+      ...command.slice(1),
+    ];
+  }
+  return command;
+}
+
+function timeoutGraceMs(command: string[], spawnedCommand: string[]): number {
+  if (process.platform !== "win32" || command.length === 0) {
+    return 0;
+  }
+  if (command.length === spawnedCommand.length && command.every((value, index) => value === spawnedCommand[index])) {
+    return 0;
+  }
+  return WINDOWS_SCRIPT_TIMEOUT_GRACE_MS;
 }
 
 function classifyRunFailure(result: CommandExecutionResult): RunExitStatus | null {

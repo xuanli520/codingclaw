@@ -72,7 +72,7 @@ The task packet must:
 
 - the loop launches only one role at a time
 - the worker may be builder, QA, or review
-- Phase 1 requires builder and QA only. Review remains optional until a later phase enables it.
+- Phase 1 requires builder and QA only. Builder is expected to run through Claude Code, QA through Codex. Review remains optional until a later phase enables it.
 - workers must return standard output objects and a standard exit status
 - unapproved privileged actions must interrupt execution and return approval-needed status
 

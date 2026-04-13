@@ -2,15 +2,14 @@
 
 ## Purpose
 
-This document defines the controlled handoff from automated execution to human takeover.
+This document defines the controlled handoff from automated execution to human takeover when local automation on the Ubuntu host cannot proceed.
 
 ## Trigger Conditions
 
 Takeover may be triggered when:
 
-- a GUI-only step blocks progress
+- a local GUI step blocks progress after normal automation has been attempted
 - credentials require an interactive login
-- a Windows-only tool is required
 - policy demands human confirmation inside a live UI
 
 ## Standard Flow
@@ -20,8 +19,8 @@ DETECT_GUI_EXCEPTION
  -> PAUSE_MAIN_LOOP
  -> PREPARE_TAKEOVER_PACKET
  -> ISSUE_APPROVAL_CARD
- -> OPEN_WUYING_BRIDGE
- -> HUMAN_OR_ASSISTED_ACTION
+ -> OPEN_LOCAL_GUI_SESSION
+ -> HUMAN_ACTION
  -> CAPTURE_RESULT
  -> WRITE_HANDOFF
  -> RESUME_OR_TERMINATE

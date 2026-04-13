@@ -55,9 +55,9 @@ Workers run in isolated environments. Builder produces implementation artifacts.
 
 This plane stores all long-lived state, reports, logs, evidence, sessions, checksums, and manifests required for replay and audit.
 
-### GUI Exception Plane
+### Local GUI Runtime Plane
 
-Aliyun Wuying Desktop is reserved for GUI-only tasks, human takeover, and assisted recovery. It is not a primary coding surface.
+A single Ubuntu host with a graphical session is the supported GUI execution surface. Headed browser or desktop automation runs locally on that host. Manual takeover remains an exceptional fallback, not the primary path.
 
 ## Mandatory Lifecycle
 
@@ -125,8 +125,9 @@ Phase 1 is the minimum working product. It includes:
 - one Chinese mobile entry channel
 - one control shell
 - one generic CLI adapter
-- one builder worker
-- one QA worker
+- one Claude Code builder worker
+- one Codex QA worker
+- one Ubuntu host with a graphical session for local full automation when a story needs a real GUI surface
 - contract binding to `base_commit`
 - traceability from story to acceptance to QA verdict
 - local artifact archival and checksums
@@ -138,7 +139,7 @@ Phase 1 excludes:
 - multi-channel concurrency
 - multi-adapter parallel execution
 - mandatory review executor in the live path
-- Wuying automation
+- cloud desktop bridges or vendor-specific remote desktop orchestration
 - dashboards
 - historical job reuse
 - production-scale multi-tenant scheduling
@@ -158,5 +159,5 @@ Phase 1 excludes:
 - [APPROVAL_CARD_SPEC.md](APPROVAL_CARD_SPEC.md)
 - [REVIEW_CONTRACT.en.md](REVIEW_CONTRACT.en.md)
 - [ARTIFACT_LAYOUT_SPEC.md](ARTIFACT_LAYOUT_SPEC.md)
-- [WUYING_INTEGRATION_PLAN.md](WUYING_INTEGRATION_PLAN.md)
+- [UBUNTU_GUI_RUNTIME_PLAN.md](UBUNTU_GUI_RUNTIME_PLAN.md)
 - [TAKEOVER_PACKET_TEMPLATE.en.md](TAKEOVER_PACKET_TEMPLATE.en.md)

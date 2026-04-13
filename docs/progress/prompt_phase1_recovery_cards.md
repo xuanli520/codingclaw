@@ -39,7 +39,7 @@ In scope
 Out of scope
 - mobile channel delivery or webhook integration
 - owner decision intake, pause/resume commands, or actual resume execution
-- takeover packet generation or Wuying session orchestration
+- takeover packet generation or local GUI session orchestration
 - review executor behavior
 - fixback or change-request workflow redesign
 - policy-engine expansion for `FAILED_POLICY`

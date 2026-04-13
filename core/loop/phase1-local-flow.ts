@@ -25,6 +25,7 @@ import {
   readJson,
   readText,
   sha256Text,
+  toPosixPath,
   uniqueStrings,
   writeJson,
   writeText,
@@ -169,6 +170,11 @@ async function buildTaskPacket(
   persist = true,
 ): Promise<TaskPacket> {
   const taskPacketPath = join(artifactRoot, "metadata", "task-packet.en.json");
+  const normalizedRepoRoot = toPosixPath(repoRoot);
+  const normalizedStateRoot = toPosixPath(stateRoot);
+  const normalizedArtifactRoot = toPosixPath(artifactRoot);
+  const normalizedRuntimeHome = toPosixPath(runtimeHome);
+  const normalizedPreviousHandoffPath = previousHandoffPath.length > 0 ? toPosixPath(previousHandoffPath) : "";
   const { expectedArtifacts, verificationTargets } = roleArtifacts(runRole);
 
   const packetWithoutChecksum = await materializeJsonTemplate<TaskPacket>(
@@ -177,13 +183,13 @@ async function buildTaskPacket(
       __RUN_ROLE__: runRole,
       __RUN_ATTEMPT__: 1,
       __RUN_ID__: runId,
-      __REPO_PATH__: repoRoot,
+      __REPO_PATH__: normalizedRepoRoot,
       __BASE_COMMIT__: baseCommit,
-      __STATE_PATH__: stateRoot,
-      __ARTIFACT_PATH__: artifactRoot,
-      __RUNTIME_HOME__: runtimeHome,
+      __STATE_PATH__: normalizedStateRoot,
+      __ARTIFACT_PATH__: normalizedArtifactRoot,
+      __RUNTIME_HOME__: normalizedRuntimeHome,
       __TASK_PACKET_SHA256__: "",
-      __PREVIOUS_HANDOFF_PATH__: previousHandoffPath,
+      __PREVIOUS_HANDOFF_PATH__: normalizedPreviousHandoffPath,
       __VERIFICATION_TARGETS__: verificationTargets,
       __EXPECTED_ARTIFACTS__: expectedArtifacts,
     },
@@ -215,21 +221,28 @@ async function buildRunEnvelope(
   approvalSnapshotPath: string,
   traceContext: Record<string, unknown>,
 ): Promise<RunEnvelope> {
+  const normalizedRepoRoot = toPosixPath(repoRoot);
+  const normalizedStateRoot = toPosixPath(stateRoot);
+  const normalizedArtifactRoot = toPosixPath(artifactRoot);
+  const normalizedRuntimeHome = toPosixPath(runtimeHome);
+  const normalizedTaskPacketPath = toPosixPath(join(artifactRoot, "metadata", "task-packet.en.json"));
+  const normalizedPreviousHandoffPath = previousHandoffPath.length > 0 ? toPosixPath(previousHandoffPath) : "";
+  const normalizedApprovalSnapshotPath = toPosixPath(approvalSnapshotPath);
   const envelope = await materializeJsonTemplate<RunEnvelope>(
     join(repoRoot, "control", "fixtures", "phase1-local-run-envelope.json"),
     {
       __RUN_ID__: taskPacket.run_id,
       __RUN_ROLE__: taskPacket.run_role,
       __RUN_ATTEMPT__: taskPacket.run_attempt,
-      __REPO_PATH__: repoRoot,
+      __REPO_PATH__: normalizedRepoRoot,
       __BASE_COMMIT__: taskPacket.base_commit,
-      __STATE_PATH__: stateRoot,
-      __ARTIFACT_PATH__: artifactRoot,
-      __RUNTIME_HOME__: runtimeHome,
-      __TASK_PACKET_PATH__: join(artifactRoot, "metadata", "task-packet.en.json"),
+      __STATE_PATH__: normalizedStateRoot,
+      __ARTIFACT_PATH__: normalizedArtifactRoot,
+      __RUNTIME_HOME__: normalizedRuntimeHome,
+      __TASK_PACKET_PATH__: normalizedTaskPacketPath,
       __TASK_PACKET_SHA256__: taskPacket.task_packet_sha256,
-      __PREVIOUS_HANDOFF_PATH__: previousHandoffPath,
-      __APPROVAL_SNAPSHOT_PATH__: approvalSnapshotPath,
+      __PREVIOUS_HANDOFF_PATH__: normalizedPreviousHandoffPath,
+      __APPROVAL_SNAPSHOT_PATH__: normalizedApprovalSnapshotPath,
       __TRACE_CONTEXT__: traceContext,
     },
   );

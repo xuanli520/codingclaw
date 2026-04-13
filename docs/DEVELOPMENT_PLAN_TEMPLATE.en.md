@@ -44,7 +44,7 @@ This document defines the required section order for `DEVELOPMENT_PLAN.en.md`.
 
 - planned adapters
 - expected run roles
-- any GUI exception expectation
+- any local GUI automation expectation
 
 ### 8. Architecture Direction
 

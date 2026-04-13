@@ -2,20 +2,20 @@
 
 ## Purpose
 
-This policy defines when GUI handling is allowed and how it is governed.
+This policy defines when local GUI automation is allowed and how it is governed.
 
 ## GUI Exception Definition
 
-A GUI exception is a task step that cannot reasonably be completed through approved APIs, CLI tools, or non-interactive automation.
+A GUI execution step is a task step that needs a real display, browser window, or desktop application and cannot reasonably be completed through pure CLI or API automation alone.
 
 ## Allowed Cases
 
 Allowed cases may include:
 
+- headed browser automation on the Ubuntu host
+- Linux desktop-only tooling
 - mandatory interactive login
-- desktop-only tooling
-- remote approval inside a managed desktop
-- visual validation that requires a real GUI surface
+- visual validation that requires a real rendered surface
 
 ## Disallowed Cases
 
@@ -24,13 +24,15 @@ GUI handling must not be used to:
 - replace normal builder execution
 - bypass missing CLI automation that should be implemented
 - hide unlogged actions
+- depend on a cloud desktop bridge for the normal execution path
 - avoid approval and evidence requirements
 
 ## Governance Rules
 
-- GUI entry requires explicit approval
-- the main loop must leave its active `RUNNING_*` state and enter `AWAITING_TAKEOVER` before takeover starts
-- the human or assisted operator must record what changed
+- in-scope local GUI automation may run automatically on the approved Ubuntu host when the active adapter profile declares the required capability
+- manual takeover still requires explicit approval
+- the main loop must leave its active `RUNNING_*` state and enter `AWAITING_TAKEOVER` before manual takeover starts
+- the human operator must record what changed
 - resulting artifacts must be archived
 - the resumed loop must reference the takeover output
 
@@ -38,10 +40,10 @@ GUI handling must not be used to:
 
 GUI-related interruptions should map to:
 
-- `AWAITING_TAKEOVER` when waiting for takeover
+- `AWAITING_TAKEOVER` when waiting for manual takeover
 - `AWAITING_APPROVAL` when approval is missing
-- `FAILED_EXECUTION` or `FAILED_INFRA` when the desktop session fails
+- `FAILED_EXECUTION` or `FAILED_INFRA` when the local GUI session fails
 
 ## Phase 1 Rule
 
-Phase 1 treats GUI handling as documented policy only. Operational automation is deferred until the core loop is stable.
+Phase 1 allows local GUI automation on the supported Ubuntu host. Remote desktop orchestration remains out of scope.
