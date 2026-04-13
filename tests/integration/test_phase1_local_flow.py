@@ -380,6 +380,10 @@ def write_requested_capabilities(repo_root: Path, requested_capabilities: list[s
         fixture_path.write_text(json.dumps(fixture, indent=2) + "\n", encoding="utf-8")
 
 
+def remove_capability_manifest(repo_root: Path) -> None:
+    (repo_root / "adapters" / "generic-cli" / "adapter-capability.json").unlink()
+
+
 def write_plan_approval_decision(repo_root: Path, decision: str) -> None:
     decision_path = repo_root / "control" / "fixtures" / "phase1-local-approval-decision.json"
     payload = json.loads(decision_path.read_text(encoding="utf-8"))
@@ -775,6 +779,34 @@ def test_phase1_local_capability_gate_stops_undeclared_or_denied_requests_before
 
 @pytest.mark.integration
 @pytest.mark.skipif(shutil.which("bun") is None, reason="bun is required")
+def test_phase1_local_capability_gate_manifest_load_failure_returns_failed_policy(tmp_path):
+    repo_root = export_repo(tmp_path)
+    fake_docker = write_fake_docker(tmp_path)
+    capture_dir = tmp_path / "captures"
+    remove_capability_manifest(repo_root)
+    result = run_phase1(
+        repo_root,
+        {
+            "CODINGCLAW_DOCKER_BIN": str(fake_docker),
+            "CODINGCLAW_FAKE_DOCKER_CAPTURE_DIR": str(capture_dir),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
+
+    job_root = repo_root / "jobs" / "job-phase1-local"
+    manifest = json.loads((job_root / "job-manifest.json").read_text(encoding="utf-8"))
+    run_root = next(path for path in (job_root / "artifacts" / "runs").iterdir() if path.is_dir())
+    command_log = (run_root / "logs" / "command-log.txt").read_text(encoding="utf-8")
+
+    assert [run["run_exit_status"] for run in manifest["runs"]] == ["FAILED_POLICY"]
+    assert manifest["status"] == "AWAITING_OWNER"
+    assert "capability gate could not load adapter policy" in command_log
+    assert not capture_dir.exists() or not list(capture_dir.iterdir())
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(shutil.which("bun") is None, reason="bun is required")
 def test_phase1_local_takeover_run_writes_takeover_packet_and_manifest_reference(tmp_path):
     repo_root = export_repo(tmp_path)
     fake_docker = write_fake_docker(tmp_path)
@@ -792,6 +824,7 @@ def test_phase1_local_takeover_run_writes_takeover_packet_and_manifest_reference
     manifest = json.loads((job_root / "job-manifest.json").read_text(encoding="utf-8"))
     run_record = manifest["runs"][0]
     takeover_packet_path = job_root / run_record["takeover_packet_path"]
+    takeover_packet = takeover_packet_path.read_text(encoding="utf-8")
     artifact_index = json.loads((job_root / run_record["artifact_index_path"]).read_text(encoding="utf-8"))
     indexed_paths = {entry["path"] for entry in artifact_index["artifacts"]}
 
@@ -801,6 +834,7 @@ def test_phase1_local_takeover_run_writes_takeover_packet_and_manifest_reference
     assert run_record["takeover_packet_path"].endswith("takeover/takeover-packet.en.md")
     assert "takeover/takeover-packet.en.md" in indexed_paths
     assert_takeover_pause_context(manifest, job_root, "AWAITING_TAKEOVER")
+    assert manifest["pause_context"]["related_card_id"] in takeover_packet
 
 
 @pytest.mark.integration
