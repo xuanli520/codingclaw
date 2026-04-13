@@ -165,59 +165,6 @@ function renderHandoff(
   ].join("\n");
 }
 
-function renderTakeoverPacket(envelope: RunEnvelope, workerOutput: WorkerOutput): string {
-  const approvalCardId = String((envelope.approval_context.approval_card_id ?? "n/a") as string);
-  const evidenceDestination = `artifacts/runs/${envelope.run_id}/takeover/result.en.md`;
-  const blockedStep = workerOutput.open[0] ?? workerOutput.next_action;
-  const reason = workerOutput.blockers[0] ?? `worker returned ${workerOutput.status}`;
-  return [
-    "# Takeover Packet",
-    "",
-    "## Run Identity",
-    "",
-    `- job ID: ${envelope.job_id}`,
-    `- run ID: ${envelope.run_id}`,
-    `- freeze version: ${envelope.freeze_version}`,
-    `- story ID: ${envelope.story_id}`,
-    `- triggering run role: ${envelope.run_role}`,
-    `- triggering exit status: ${workerOutput.status}`,
-    "",
-    "## Blocked Step",
-    "",
-    `- exact blocked action: ${blockedStep}`,
-    `- reason automation cannot continue: ${reason}`,
-    "- current page, tool, or environment when relevant: generic-cli worker container",
-    "",
-    "## Required Human Action",
-    "",
-    `- concrete human task: ${workerOutput.next_action}`,
-    "- allowed action boundary: stay inside the active story, freeze, and run root",
-    "- forbidden actions: do not widen scope, mutate approvals, or bypass evidence capture",
-    "- expected completion signal: write the takeover outcome into the archived result record",
-    "",
-    "## Access And Approval Context",
-    "",
-    `- approval card ID: ${approvalCardId}`,
-    "- approved access method: local governed takeover",
-    "- credential handling rule: do not expose long-lived secrets in artifacts",
-    `- timeout or expiry condition: ${new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()}`,
-    "",
-    "## Expected Result",
-    "",
-    `- expected output: ${workerOutput.next_action}`,
-    `- artifact destination: ${evidenceDestination}`,
-    `- evidence destination: ${evidenceDestination}`,
-    "- resume criteria: result is archived under the same run_id takeover root and referenced by the manifest",
-    "",
-    "## Resume Notes",
-    "",
-    `- next loop role: ${envelope.run_role}`,
-    "- next command or check: review the takeover result and decide whether to resume or terminate",
-    "- rollback instruction if the takeover fails: stop the job and return control to owner review",
-    "",
-  ].join("\n");
-}
-
 function withBuilderFallbackPaths(workerOutput: WorkerOutput): WorkerOutput {
   return {
     ...workerOutput,
@@ -476,9 +423,6 @@ export class GenericCliAdapter {
       workerOutput.status === "AWAITING_TAKEOVER"
         ? join(runRoot, "takeover", "takeover-packet.en.md")
         : null;
-    if (takeoverPacketPath !== null) {
-      await writeText(takeoverPacketPath, renderTakeoverPacket(envelope, workerOutput));
-    }
 
     const artifactIndex = await buildArtifactIndex(runRoot, envelope.run_id, envelope.run_role);
     await writeJson(artifactIndexPath, artifactIndex);

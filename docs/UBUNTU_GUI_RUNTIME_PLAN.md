@@ -8,7 +8,7 @@ Supporting feasibility notes for this positioning are collected in [OFFICIAL_REF
 
 ## Positioning
 
-The Ubuntu GUI host is the default graphical execution surface. It exists for:
+The Ubuntu GUI host is the planned graphical execution surface. It exists for:
 
 - fully automated headed browser workflows
 - fully automated Linux desktop tooling
@@ -36,7 +36,7 @@ The integration should define:
 ## Control Rules
 
 - the supported deployment target is one Ubuntu host with a graphical session
-- standard in-scope local GUI automation may run automatically when the active adapter profile declares the required capability
+- standard in-scope local GUI automation may run automatically only after the active adapter profile declares and enables the required capability
 - builder uses Claude Code and QA uses Codex in Phase 1
 - main loop execution must transition into `AWAITING_TAKEOVER` during manual takeover unless the task is explicitly parallel-safe
 - all takeover results must be written back under `artifacts/runs/<run_id>/takeover/` and referenced by handoff and manifest records
@@ -45,16 +45,17 @@ The integration should define:
 
 ### Phase 1
 
-- one Ubuntu host with a graphical session
-- automated builder flow through Claude Code
-- automated QA flow through Codex
-- local headed browser or GUI execution when a story requires a real rendered surface
+- one Ubuntu host with a graphical session may be prepared for later runtime rollout
+- takeover packet generation and archive path for blocked GUI work
+- no live browser or desktop automation in the active adapter profile yet
 - no dependency on a cloud desktop vendor
 
 ### Phase 2
 
+- automated builder flow through Claude Code
+- automated QA flow through Codex
+- local headed browser or GUI execution when a story requires a real rendered surface
 - hardened host display bootstrap
-- managed takeover packet format and archive path
 - stable resume semantics
 
 ### Phase 3

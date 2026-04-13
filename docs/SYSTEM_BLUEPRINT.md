@@ -41,7 +41,7 @@ CodingClaw is not:
 
 ### Control Shell
 
-The control shell accepts Chinese commands, normalizes requirements, manages approval gates, budgets, policy guards, and dispatches loop work through adapters governed by [EXECUTOR_ADAPTER_CONTRACT.md](EXECUTOR_ADAPTER_CONTRACT.md).
+The target control shell accepts Chinese commands, normalizes requirements, manages approval gates, budgets, policy guards, and dispatches loop work through adapters governed by [EXECUTOR_ADAPTER_CONTRACT.md](EXECUTOR_ADAPTER_CONTRACT.md). The current Phase 1 local slice exposes a repository-invoked `bun run phase1` proof command instead of the live intake surface.
 
 ### Coding Loop Kernel
 
@@ -57,7 +57,7 @@ This plane stores all long-lived state, reports, logs, evidence, sessions, check
 
 ### Local GUI Runtime Plane
 
-A single Ubuntu host with a graphical session is the supported GUI execution surface. Headed browser or desktop automation runs locally on that host. Manual takeover remains an exceptional fallback, not the primary path.
+A single Ubuntu host with a graphical session is the planned GUI execution surface. The current Phase 1 local slice records takeover contracts and waiting states, but it does not yet enable live headed browser or desktop automation in the active adapter profile.
 
 ## Mandatory Lifecycle
 
@@ -71,7 +71,7 @@ INTAKE
  -> STORY_QUEUE_READY
  -> BUILD_EXECUTION
  -> QA_VALIDATION
- -> FIXBACK(optional)
+ -> FIXBACK(optional, manual in the current Phase 1 local slice)
  -> FINAL_APPROVAL(optional)
  -> ARCHIVE
 ```
@@ -122,12 +122,12 @@ At archive finalization:
 
 Phase 1 is the minimum working product. It includes:
 
-- one Chinese mobile entry channel
+- one repository-invoked local control command for the fixed proof slice
 - one control shell
 - one generic CLI adapter
 - one Claude Code builder worker
 - one Codex QA worker
-- one Ubuntu host with a graphical session for local full automation when a story needs a real GUI surface
+- takeover packet and waiting-state support for future local GUI execution, without live browser or desktop automation yet
 - contract binding to `base_commit`
 - traceability from story to acceptance to QA verdict
 - local artifact archival and checksums
@@ -139,6 +139,8 @@ Phase 1 excludes:
 - multi-channel concurrency
 - multi-adapter parallel execution
 - mandatory review executor in the live path
+- live Chinese mobile intake
+- live local browser or desktop automation
 - cloud desktop bridges or vendor-specific remote desktop orchestration
 - dashboards
 - historical job reuse

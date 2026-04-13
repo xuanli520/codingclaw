@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import { GenericCliAdapter } from "../../adapters/generic-cli/adapter.ts";
+import { buildArtifactIndex } from "../../ops/archive/artifact-index.ts";
 import { writeApprovalArchive } from "../../ops/archive/approvals.ts";
 import {
   buildEnvironmentSnapshotMetadata,
@@ -641,6 +642,9 @@ async function writeRecoveryTakeoverPacket(
       "",
     ].join("\n"),
   );
+  const artifactIndex = await buildArtifactIndex(execution.runRoot, execution.runResult.run_id, execution.runResult.run_role);
+  execution.artifactIndex = artifactIndex;
+  await writeJson(execution.artifactIndexPath, artifactIndex);
 }
 
 function buildPauseContext(

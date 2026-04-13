@@ -825,6 +825,7 @@ def test_phase1_local_takeover_run_writes_takeover_packet_and_manifest_reference
     run_record = manifest["runs"][0]
     takeover_packet_path = job_root / run_record["takeover_packet_path"]
     takeover_packet = takeover_packet_path.read_text(encoding="utf-8")
+    recovery_card = json.loads((job_root / "approvals" / manifest["pause_context"]["related_card_id"] / "approval-card.json").read_text(encoding="utf-8"))
     artifact_index = json.loads((job_root / run_record["artifact_index_path"]).read_text(encoding="utf-8"))
     indexed_paths = {entry["path"] for entry in artifact_index["artifacts"]}
 
@@ -835,6 +836,8 @@ def test_phase1_local_takeover_run_writes_takeover_packet_and_manifest_reference
     assert "takeover/takeover-packet.en.md" in indexed_paths
     assert_takeover_pause_context(manifest, job_root, "AWAITING_TAKEOVER")
     assert manifest["pause_context"]["related_card_id"] in takeover_packet
+    assert recovery_card["timeout_at"] == manifest["pause_context"]["expires_at"]
+    assert recovery_card["timeout_at"] in takeover_packet
 
 
 @pytest.mark.integration

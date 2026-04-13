@@ -49,8 +49,8 @@ Current gaps:
 
 - `StateStore` writes directly, without an atomic write path or a write lock
 - state has one root and one mirror, but no root, session, and run scope resolver
-- capability data is passed through, but `GenericCliAdapter` does not enforce default-deny execution against the manifest
-- shell and secret rules exist as policy text, but not as host-side runtime guards
+- shell and secret rules still exist mostly as policy text, not as host-side runtime guards
+- local GUI automation remains a later profile enablement rather than an active Phase 1 runtime path
 
 ## External Adoption Targets
 

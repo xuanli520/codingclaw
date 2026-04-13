@@ -46,4 +46,4 @@ GUI-related interruptions should map to:
 
 ## Phase 1 Rule
 
-Phase 1 allows local GUI automation on the supported Ubuntu host. Remote desktop orchestration remains out of scope.
+Phase 1 local execution records GUI and takeover contract artifacts only. Automated local GUI execution remains disabled until the active adapter profile explicitly enables browser and screenshot capabilities. Remote desktop orchestration remains out of scope.

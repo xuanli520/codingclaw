@@ -156,4 +156,5 @@ After each run, the loop must update:
 
 - fixback should usually remain within the same story
 - fixback must not silently expand scope
-- Phase 1 should cap fixback at 2 or 3 rounds per story
+- the current Phase 1 local slice stops at `FIXBACK_PENDING` and requires an explicit next-step decision before another run is scheduled
+- an automated fixback retry ceiling applies only after multi-round fixback scheduling is implemented
